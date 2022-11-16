@@ -3,6 +3,10 @@
 #include <string.h>
 #include <stdint.h>
 
+#include <sys/stat.h>
+#include <linux/limits.h>
+#include <dirent.h>
+
 void panic(void) {
     abort();
 }
@@ -17,7 +21,7 @@ typedef enum {
     EUnimplemented,
 } Error;
 
-typedef uint64_t Packet;
+typedef uint8_t Packet;
 #define PXOR(x, y) do { \
     (x) ^= (y); \
 } while (0)
@@ -27,6 +31,7 @@ typedef uint64_t Packet;
 #define PASGN(x, y) do { \
     (x) = (y); \
 } while (0)
+#define PMAX (101)
 
 
 typedef struct {
@@ -34,17 +39,17 @@ typedef struct {
     Packet data[];
 } Chunk;
 
-inline Chunk *chunk_init(Chunk *chunk, int p) {
+Chunk *chunk_init(Chunk *chunk, int p) {
     chunk->p = p;
     return chunk;
 }
 
-inline size_t chunk_size(int p) {
+size_t chunk_size(int p) {
     size_t num = (p + 2) * (p - 1);
     return sizeof(Chunk) + sizeof(Packet) * num;
 }
 
-inline Chunk *chunk_new(int p) {
+Chunk *chunk_new(int p) {
     Chunk *result = (Chunk *)malloc(chunk_size(p));
     return chunk_init(result, p);
 }
@@ -68,30 +73,51 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
 }
 
 Error cook_chunk(Chunk *chunk) {
-    int bad_disks[2] = { chunk->p, -1 };
-    return try_repair_chunk(chunk, bad_disks);
-    // TODO
+    for (int i = 0; i < chunk->p - 1; ++i) {
+        PZERO(AT(i, chunk->p));
+    }
+    for (int j = 0; j < chunk->p; ++j) {
+        for (int i = 0; i < chunk->p - 1; ++i) {
+            PXOR(AT(i, chunk->p), AT(i, j));
+        }
+    }
+    Packet syndrome;
+    PZERO(syndrome);
+    for (int i = 0; i < chunk->p - 1; ++i) {
+        PXOR(syndrome, AT(i, chunk->p - 1 - i));
+    }
+    for (int i = 0; i < chunk->p - 1; ++i) {
+        PASGN(AT(i, chunk->p + 1), syndrome);
+    }
+    for (int j = 0; j < chunk->p; ++j) {
+        for (int i = 0; i < chunk->p - 1; ++i) {
+            if (i + j != chunk->p - 1) {
+                PXOR(AT((i + j) % chunk->p, chunk->p + 1), AT(i, j));
+            }
+        }
+    }
+    return Success;
 }
 
-inline Error write_raw_chunk_limited(Chunk *chunk, FILE *file, size_t limit) {
+Error write_raw_chunk_limited(Chunk *chunk, FILE *file, size_t limit) {
     fwrite(chunk->data, sizeof(Packet), limit, file);
     return Success;
 }
 
-inline Error write_raw_chunk(Chunk *chunk, FILE *file) {
+Error write_raw_chunk(Chunk *chunk, FILE *file) {
     size_t num = chunk->p * (chunk->p - 1);
     fwrite(chunk->data, sizeof(Packet), num, file);
     return Success;
 }
 
-inline Error read_raw_chunk(Chunk *chunk, FILE *file) {
+Error read_raw_chunk(Chunk *chunk, FILE *file) {
     size_t num = chunk->p * (chunk->p - 1);
     size_t ok = fread(chunk->data, sizeof(Packet), num, file);
     memset(chunk->data + ok, 0, ((chunk->p - 1) * 2 + (num - ok)) * sizeof(Packet));
     return Success;
 }
 
-inline Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
+Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
@@ -102,7 +128,18 @@ inline Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
     return Success;
 }
 
-inline Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
+Error write_cooked_chunk_to_bad_disk(Chunk *chunk, int bad_disks[2], FILE *bad_disk_fp[2]) {
+    int items_per_disk = chunk->p - 1;
+    Packet *data = chunk->data;
+    for (int i = 0; i < 2; ++i) {
+        if (bad_disks[i] != -1) {
+            fwrite(data + items_per_disk * bad_disks[i], sizeof(Packet), items_per_disk, bad_disk_fp[i]);
+        }
+    }
+    return Success;
+}
+
+Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
@@ -133,6 +170,138 @@ inline Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
     return Success;
 }
 
+typedef struct {
+    int p;
+    size_t size;
+    size_t full_chunk_num;
+    size_t last_chunk_data_size;
+} Metadata;
+
+void skip_metadata(FILE *file) {
+    Metadata data;
+    fread(&data, sizeof(data), 1, file);
+}
+
+void write_metadata(Metadata data, FILE *file) {
+    fwrite(&data, sizeof(data), 1, file);
+}
+
+Metadata get_raw_file_metadata(const char *filename, int p) {
+    Metadata result;
+    FILE *fp = fopen(filename, "rb");
+    result.p = p;
+    fseek(fp, 0, SEEK_END);
+    result.size = ftell(fp);
+    size_t chunk_data_size = sizeof(Packet) * p * (p - 1);
+    result.full_chunk_num = result.size / chunk_data_size;
+    result.last_chunk_data_size = result.size - result.full_chunk_num * chunk_data_size;
+    return result;
+}
+
+Metadata get_cooked_file_metadata(const char *filename) {
+    Metadata result;
+    for (int i = 0; i < 3; ++i) {
+        char path[PATH_MAX];
+        sprintf(path, "disk_%d/%s", i, filename);
+        FILE *fp = fopen(path, "rb");
+        if (fp != NULL) {
+            fread(&result, sizeof(result), 1, fp);
+            fclose(fp);
+            break;
+        }
+    }
+    return result;
+}
+
+void read_file(const char *filename, const char *save_as) {
+    FILE *out = fopen(save_as, "wb");
+    FILE *in[PMAX + 2]; // FIXME: dirty hack
+    Metadata meta = get_cooked_file_metadata(filename);
+    int p = meta.p;
+
+    for (int i = 0; i < p + 2; ++i) {
+        char path[PATH_MAX];
+        sprintf(path, "disk_%d/%s", i, filename);
+        in[i] = fopen(path, "rb");
+        if (in[i] != NULL)
+            skip_metadata(in[i]);
+    }
+
+    Chunk *chunk = chunk_new(p);
+    for (int i = 0; i < meta.full_chunk_num; ++i) {
+        read_cooked_chunk(chunk, in);
+        write_raw_chunk(chunk, out);
+    }
+    if (meta.last_chunk_data_size != 0) {
+        read_cooked_chunk(chunk, in);
+        write_raw_chunk_limited(chunk, out, meta.last_chunk_data_size);
+    }
+    free(chunk);
+}
+
+void write_file(const char *file_to_read, int p) {
+    FILE *in = fopen(file_to_read, "rb");
+    FILE *out[PMAX + 2]; // FIXME: dirty hack
+    Metadata meta = get_raw_file_metadata(file_to_read, p);
+
+    for (int i = 0; i < p + 2; ++i) {
+        char path[PATH_MAX];
+        sprintf(path, "disk_%d", i);
+        mkdir(path, 0755);
+        sprintf(path, "disk_%d/%s", i, file_to_read);
+        out[i] = fopen(path, "wb");
+        write_metadata(meta, out[i]);
+    }
+
+    Chunk *chunk = chunk_new(p);
+    for (int i = 0; i < meta.full_chunk_num; ++i) {
+        read_raw_chunk(chunk, in);
+        cook_chunk(chunk);
+        write_cooked_chunk(chunk, out);
+    }
+    if (meta.last_chunk_data_size != 0) {
+        read_raw_chunk(chunk, in);
+        cook_chunk(chunk);
+        write_cooked_chunk(chunk, out);
+    }
+    free(chunk);
+}
+
+void repair_file(const char *fname, int bad_disks[2]) {
+    FILE *in[PMAX + 2]; // FIXME: dirty hack
+    FILE *out[2] = { NULL, NULL };
+    char path[PATH_MAX];
+    Metadata meta = get_cooked_file_metadata(fname);
+
+    for (int i = 0; i < meta.p + 2; ++i) {
+        sprintf(path, "disk_%d", i);
+        mkdir(path, 0755);
+        sprintf(path, "disk_%d/%s", i, fname);
+        in[i] = fopen(path, "rb");
+        if (in[i] != NULL)
+            skip_metadata(in[i]);
+    }
+
+    for (int i = 0; i < 2; ++i) {
+        if (bad_disks[i] != -1) {
+            sprintf(path, "disk_%d/%s", i, fname);
+            out[i] = fopen(path, "wb");
+            write_metadata(meta, out[i]);
+        }
+    }
+
+    Chunk *chunk = chunk_new(meta.p);
+    for (int i = 0; i < meta.full_chunk_num; ++i) {
+        read_cooked_chunk(chunk, in);
+        write_cooked_chunk_to_bad_disk(chunk, bad_disks, out);
+    }
+    if (meta.last_chunk_data_size != 0) {
+        read_cooked_chunk(chunk, in);
+        write_cooked_chunk_to_bad_disk(chunk, bad_disks, out);
+    }
+    free(chunk);
+}
+
 void usage() {
     printf("./evenodd write <file_name> <p>\n");
     printf("./evenodd read <file_name> <save_as>\n");
@@ -147,32 +316,31 @@ int main(int argc, char** argv) {
 
     char* op = argv[1];
     if (strcmp(op, "write") == 0) {
-        /*
-         * Please encode the input file with EVENODD code
-         * and store the erasure-coded splits into corresponding disks
-         * For example: Suppose "file_name" is "testfile", and "p" is 5. After your
-         * encoding logic, there should be 7 splits, "testfile_0", "testfile_1",
-         * ..., "testfile_6", stored in 7 diffrent disk folders from "disk_0" to
-         * "disk_6".
-         */
-
-    } else if (strcmp(op, "read")) {
-        /*
-         * Please read the file specified by "file_name", and store it as a file
-         * named "save_as" in the local file system.
-         * For example: Suppose "file_name" is "testfile" (which we have encoded
-         * before), and "save_as" is "tmp_file". After the read operation, there
-         * should be a file named "tmp_file", which is the same as "testfile".
-         */
+        write_file(argv[2], atoi(argv[3]));
+    } else if (strcmp(op, "read") == 0) {
+        read_file(argv[2], argv[3]);
     } else if (strcmp(op, "repair")) {
-        /*
-         * Please repair failed disks. The number of failures is specified by
-         * "num_erasures", and the index of disks are provided in the command
-         * line parameters.
-         * For example: Suppose "number_erasures" is 2, and the indices of
-         * failed disks are "0" and "1". After the repair operation, the data
-         * splits in folder "disk_0" and "disk_1" should be repaired.
-         */
+        int bad_disk_num = atoi(argv[2]);
+        int bad_disks[2] = { -1, -1 };
+        for (int i = 0; i < bad_disk_num; ++i) {
+            bad_disks[i] = atoi(argv[i + 3]);
+        }
+
+        DIR *dir;
+        for (int i = 0; i < 3; ++i) {
+            char path[PATH_MAX];
+            sprintf(path, "disk_%d", i);
+            dir = opendir(path);
+            if (dir != NULL) {
+                break;
+            }
+        }
+
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            repair_file(entry->d_name, bad_disks);
+        }
+        closedir(dir);
     } else {
         printf("Non-supported operations!\n");
     }

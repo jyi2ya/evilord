@@ -1,5 +1,5 @@
 #!/bin/bash
 
-gcc -o evenodd evenodd.c
+gcc -o evenodd evenodd.c "$@"
 
 
