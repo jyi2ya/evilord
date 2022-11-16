@@ -7,7 +7,7 @@ void panic(void) {
     abort();
 }
 
-void unimplmeneted(void) {
+void unimplemented(void) {
     abort();
 }
 
@@ -61,7 +61,7 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
             }
         }
     } else {
-        unimplmeneted();
+        unimplemented();
     }
 
     return Success;
