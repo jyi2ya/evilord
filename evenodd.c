@@ -56,6 +56,11 @@ Chunk *chunk_new(int p) {
 
 #define AT(row, column) (chunk->data[(column) * (chunk->p - 1) + (row)])
 Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
+    // both the mentioned disks are fine
+    if (bad_disks[0] == -1) {
+        return Success;
+    }
+    // just the second disk is broken
     if (bad_disks[1] == -1) {
         for (int j = 0; j < chunk->p + 1; ++j) {
             if (j == bad_disks[0]) {
@@ -65,8 +70,84 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
                 PXOR(AT(i, bad_disks[0]), AT(i, j));
             }
         }
+    // both are broken
     } else {
-        unimplemented();
+#define min(x, y) (x) < (y) ? (x) : (y)
+#define max(x, y) (x) > (y) ? (x) : (y)
+#define mod_group(x, m) (x) % (m)
+        int i = min(bad_disks[0], bad_disks[1]);
+        int j = max(bad_disks[0], bad_disks[1]);
+        int p = chunk->p;
+        if (i == p && j == p + 1) {
+            // reconstruction
+            unimplemented();
+        } else if (i < p && j == p) {
+            // calculate S
+            Packet S = AT(mod_group(i - 1, p), p + 1);
+            for (int l = 0; l < p; ++l) {
+                PXOR(S, AT(mod_group(i - l - 1, p), l));
+            }
+            // recover column i
+            for (int k = 0; k < p; ++k) {
+                AT(k, i) = S;
+                PXOR(AT(k, i), AT(mod_group(i - 1, p), p + 1));
+                for (int l = 0; l < p; ++p) {
+                    if (l == i)
+                        continue;
+                    PXOR(AT(k, i), AT(mod_group(k + i - l, p), l));
+                }
+            }
+            // recover column j
+            // just reconstruction
+            unimplemented();
+        } else if (i < p && j == p + 1) {
+            // just reconstruction
+            unimplemented();
+        } else { // i < p and j < p
+            // calculate S
+            Packet S = 0;
+            for (int l = 0; l < p - 1; ++l) {
+                PXOR(S, AT(l, p));
+            }
+            for (int l = 0; l < p - 1; ++l) {
+                PXOR(S, AT(l, p + 1));
+            }
+            // horizontal syndromes S0
+            // diagonal syndromes S1
+            Packet *S0 = malloc(p * sizeof(Packet));
+            Packet *S1 = malloc(p * sizeof(Packet));
+            for (int u = 0; u < p; ++u) {
+                Packet n = 0;
+                for (int l = 0; l <= p; ++l) {
+                    if (l == i || l == j)
+                        continue;
+                    PXOR(n, AT(u, l));
+                }
+                S0[u] = n;
+            }
+            for (int u = 0; u < p; ++u) {
+                Packet n = S;
+                PXOR(n, AT(u, p + 1));
+                for (int l = 0; l < p; ++l) {
+                    if (l == i || l == j)
+                        continue;
+                    PXOR(n, AT(mod_group(u - l, p), l));
+                }
+            }
+            int s = mod_group(-(j - i) - 1, p);
+            for (int l = 0; l < p; ++l) {
+                AT(p - 1, l) = 0;
+            }
+            while (s != p - 1) {
+                AT(s, j) = S1[mod_group(j + s, p)];
+                PXOR(AT(s, j), AT(mod_group(s + (j - i), p), i));
+                AT(s, i) = S0[s];
+                PXOR(AT(s, i), AT(s, j));
+                s = mod_group(s - (j - i), p);
+            }
+            free(S0);
+            free(S1);
+        }
     }
 
     return Success;
