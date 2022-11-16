@@ -54,6 +54,7 @@ Chunk *chunk_new(int p) {
     return chunk_init(result, p);
 }
 
+#define ATR(row, column) ((row) == chunk->p - 1 ? 0 : chunk->data[(column) * (chunk->p - 1) + (row)])
 #define AT(row, column) (chunk->data[(column) * (chunk->p - 1) + (row)])
 Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
     // both the mentioned disks are fine
@@ -72,9 +73,9 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
         }
     // both are broken
     } else {
-#define min(x, y) (x) < (y) ? (x) : (y)
-#define max(x, y) (x) > (y) ? (x) : (y)
-#define mod_group(x, m) (x) % (m)
+#define min(x, y) ((x) < (y) ? (x) : (y))
+#define max(x, y) ((x) > (y) ? (x) : (y))
+#define mod_group(x, m) ((x % m + m) % (m))
         int i = min(bad_disks[0], bad_disks[1]);
         int j = max(bad_disks[0], bad_disks[1]);
         int p = chunk->p;
@@ -88,7 +89,7 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
                 PXOR(S, AT(mod_group(i - l - 1, p), l));
             }
             // recover column i
-            for (int k = 0; k < p; ++k) {
+            for (int k = 0; k < p - 1; ++k) {
                 AT(k, i) = S;
                 PXOR(AT(k, i), AT(mod_group(i - 1, p), p + 1));
                 for (int l = 0; l < p; ++p) {
@@ -121,18 +122,19 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
                 for (int l = 0; l <= p; ++l) {
                     if (l == i || l == j)
                         continue;
-                    PXOR(n, AT(u, l));
+                    PXOR(n, ATR(u, l));
                 }
                 S0[u] = n;
             }
             for (int u = 0; u < p; ++u) {
                 Packet n = S;
-                PXOR(n, AT(u, p + 1));
+                PXOR(n, ATR(u, p + 1));
                 for (int l = 0; l < p; ++l) {
                     if (l == i || l == j)
                         continue;
-                    PXOR(n, AT(mod_group(u - l, p), l));
+                    PXOR(n, ATR(mod_group(u - l, p), l));
                 }
+                S1[u] = n;
             }
             int s = mod_group(-(j - i) - 1, p);
             for (int l = 0; l < p; ++l) {
