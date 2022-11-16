@@ -1,0 +1,27 @@
+operations
+1. read <fname> <save_as>
+2. write <fname> <p>
+3. repair <bad_disk_num> <id1> [<id2>]
+
+raid status
+1. raid is ok 
+2. one disk dropped
+3. two disks dropped
+
+in-raid file status
+1. not exist.
+2. exists.
+
+raw file status
+1. not exist.
+2. exists.
+
+p
+1. 2
+2. 3, 5, 7
+3. 31, 47
+4. 97, 101
+
+file size
+1. 1, 2, 3, 4, 5
+2. (1, 2, 4, 8, 16, 32, 64, 128)k

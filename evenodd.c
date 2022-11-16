@@ -273,6 +273,10 @@ void repair_file(const char *fname, int bad_disks[2]) {
     char path[PATH_MAX];
     Metadata meta = get_cooked_file_metadata(fname);
 
+    if (bad_disks[0] == bad_disks[1]) {
+        bad_disks[1] = -1;
+    }
+
     for (int i = 0; i < meta.p + 2; ++i) {
         sprintf(path, "disk_%d", i);
         mkdir(path, 0755);
@@ -284,7 +288,7 @@ void repair_file(const char *fname, int bad_disks[2]) {
 
     for (int i = 0; i < 2; ++i) {
         if (bad_disks[i] != -1) {
-            sprintf(path, "disk_%d/%s", i, fname);
+            sprintf(path, "disk_%d/%s", bad_disks[i], fname);
             out[i] = fopen(path, "wb");
             write_metadata(meta, out[i]);
         }
@@ -319,7 +323,7 @@ int main(int argc, char** argv) {
         write_file(argv[2], atoi(argv[3]));
     } else if (strcmp(op, "read") == 0) {
         read_file(argv[2], argv[3]);
-    } else if (strcmp(op, "repair")) {
+    } else if (strcmp(op, "repair") == 0) {
         int bad_disk_num = atoi(argv[2]);
         int bad_disks[2] = { -1, -1 };
         for (int i = 0; i < bad_disk_num; ++i) {
@@ -338,7 +342,9 @@ int main(int argc, char** argv) {
 
         struct dirent *entry;
         while ((entry = readdir(dir)) != NULL) {
-            repair_file(entry->d_name, bad_disks);
+            const char *name = entry->d_name;
+            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0)
+                repair_file(entry->d_name, bad_disks);
         }
         closedir(dir);
     } else {
