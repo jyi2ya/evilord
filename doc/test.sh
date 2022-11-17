@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -xe
 
 cd "$(dirname "$0")/.." || exit 1
 sh compile.sh -fsanitize=address -Og -g
@@ -17,18 +17,18 @@ deploy() {
         ../evenodd write test.bin "$p"
         ../evenodd write test2.bin "$p"
 
-        for _ in 0 1; do #2; do
+        for _ in 0 1 2; do
             ../evenodd read test.bin test.bin.rtv
             diff test.bin test.bin.rtv || exit 2
             ../evenodd read test2.bin test2.bin.rtv
             diff test2.bin test2.bin.rtv || exit 2
 
-            rm -rf "disk_$((RANDOM % p))"
+            rm -rf "disk_$((RANDOM % (p + 2)))"
         done
 
         ../evenodd write test.bin "$p"
         ../evenodd write test2.bin "$p"
-        bad1=$((RANDOM % p))
+        bad1=$((RANDOM % (p + 2)))
         rm -rf "disk_$bad1"
         ../evenodd repair 1 "$bad1"
         ../evenodd read test.bin test.bin.rtv
@@ -36,7 +36,7 @@ deploy() {
         ../evenodd read test2.bin test2.bin.rtv
         diff test2.bin test2.bin.rtv || exit 2
 
-        bad2=$((RANDOM % p))
+        bad2=$((RANDOM % (p + 2)))
         rm -rf "disk_$bad1" "disk_$bad2"
         ../evenodd repair 2 "$bad1" "$bad2"
         ../evenodd read test.bin test.bin.rtv
