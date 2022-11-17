@@ -183,7 +183,7 @@ Error cook_chunk(Chunk *chunk) {
 }
 
 Error write_raw_chunk_limited(Chunk *chunk, FILE *file, size_t limit) {
-    fwrite(chunk->data, sizeof(Packet), limit, file);
+    fwrite(chunk->data, 1, limit, file);
     return Success;
 }
 
@@ -195,8 +195,8 @@ Error write_raw_chunk(Chunk *chunk, FILE *file) {
 
 Error read_raw_chunk(Chunk *chunk, FILE *file) {
     size_t num = chunk->p * (chunk->p - 1);
-    size_t ok = fread(chunk->data, sizeof(Packet), num, file);
-    memset(chunk->data + ok, 0, ((chunk->p - 1) * 2 + (num - ok)) * sizeof(Packet));
+    size_t ok = fread(chunk->data, 1, sizeof(Packet) * num, file);
+    memset((void *)chunk->data + ok, 0, (chunk->p - 1) * (chunk->p + 2) * sizeof(Packet) - ok);
     return Success;
 }
 
@@ -238,9 +238,9 @@ Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
             bad_disks[bad_disk_num - 1] = i;
             memset(data, 0, items_per_disk * sizeof(Packet));
         } else {
-            size_t ok = fread(data, sizeof(Packet), items_per_disk, files[i]);
-            if (ok < items_per_disk) {
-                memset(data + ok, 0, (items_per_disk - ok) * sizeof(Packet));
+            size_t ok = fread(data, 1, sizeof(Packet) * items_per_disk, files[i]);
+            if (ok < items_per_disk * sizeof(Packet)) {
+                memset((char *)data + ok, 0, items_per_disk * sizeof(Packet) - ok);
             }
         }
         data += items_per_disk;
