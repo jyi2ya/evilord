@@ -11,9 +11,10 @@ void panic(void) {
     abort();
 }
 
-void unimplemented(void) {
-    abort();
-}
+#define unimplemented() do { \
+    fprintf(stderr, "unimplemented at line %d\n", __LINE__); \
+    abort(); \
+} while (0)
 
 typedef enum {
     Success = 0,
@@ -56,6 +57,33 @@ Chunk *chunk_new(int p) {
 
 #define ATR(row, column) ((row) == chunk->p - 1 ? 0 : chunk->data[(column) * (chunk->p - 1) + (row)])
 #define AT(row, column) (chunk->data[(column) * (chunk->p - 1) + (row)])
+Error cook_chunk(Chunk *chunk) {
+    for (int i = 0; i < chunk->p - 1; ++i) {
+        PZERO(AT(i, chunk->p));
+    }
+    for (int j = 0; j < chunk->p; ++j) {
+        for (int i = 0; i < chunk->p - 1; ++i) {
+            PXOR(AT(i, chunk->p), AT(i, j));
+        }
+    }
+    Packet syndrome;
+    PZERO(syndrome);
+    for (int i = 0; i < chunk->p - 1; ++i) {
+        PXOR(syndrome, AT(i, chunk->p - 1 - i));
+    }
+    for (int i = 0; i < chunk->p - 1; ++i) {
+        PASGN(AT(i, chunk->p + 1), syndrome);
+    }
+    for (int j = 0; j < chunk->p; ++j) {
+        for (int i = 0; i < chunk->p - 1; ++i) {
+            if (i + j != chunk->p - 1) {
+                PXOR(AT((i + j) % chunk->p, chunk->p + 1), AT(i, j));
+            }
+        }
+    }
+    return Success;
+}
+
 Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
     // both the mentioned disks are fine
     if (bad_disks[0] == -1) {
@@ -63,13 +91,17 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
     }
     // just the second disk is broken
     if (bad_disks[1] == -1) {
-        for (int j = 0; j < chunk->p + 1; ++j) {
-            if (j == bad_disks[0]) {
-                continue;
+        if (bad_disks[0] <= chunk->p) {
+            for (int j = 0; j < chunk->p + 1; ++j) {
+                if (j == bad_disks[0]) {
+                    continue;
+                }
+                for (int i = 0; i < chunk->p - 1; ++i) {
+                    PXOR(AT(i, bad_disks[0]), AT(i, j));
+                }
             }
-            for (int i = 0; i < chunk->p - 1; ++i) {
-                PXOR(AT(i, bad_disks[0]), AT(i, j));
-            }
+        } else {
+            cook_chunk(chunk);
         }
     // both are broken
     } else {
@@ -81,29 +113,29 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
         int p = chunk->p;
         if (i == p && j == p + 1) {
             // reconstruction
-            unimplemented();
+            cook_chunk(chunk);
         } else if (i < p && j == p) {
             // calculate S
-            Packet S = AT(mod_group(i - 1, p), p + 1);
+            Packet S = ATR(mod_group(i - 1, p), p + 1);
             for (int l = 0; l < p; ++l) {
-                PXOR(S, AT(mod_group(i - l - 1, p), l));
+                PXOR(S, ATR(mod_group(i - l - 1, p), l));
             }
             // recover column i
             for (int k = 0; k < p - 1; ++k) {
                 AT(k, i) = S;
-                PXOR(AT(k, i), AT(mod_group(i - 1, p), p + 1));
+                PXOR(AT(k, i), ATR(mod_group(i - 1, p), p + 1));
                 for (int l = 0; l < p; ++p) {
                     if (l == i)
                         continue;
-                    PXOR(AT(k, i), AT(mod_group(k + i - l, p), l));
+                    PXOR(AT(k, i), ATR(mod_group(k + i - l, p), l));
                 }
             }
             // recover column j
             // just reconstruction
-            unimplemented();
+            cook_chunk(chunk);
         } else if (i < p && j == p + 1) {
             // just reconstruction
-            unimplemented();
+            cook_chunk(chunk);
         } else { // i < p and j < p
             // calculate S
             Packet S = 0;
@@ -152,33 +184,6 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
         }
     }
 
-    return Success;
-}
-
-Error cook_chunk(Chunk *chunk) {
-    for (int i = 0; i < chunk->p - 1; ++i) {
-        PZERO(AT(i, chunk->p));
-    }
-    for (int j = 0; j < chunk->p; ++j) {
-        for (int i = 0; i < chunk->p - 1; ++i) {
-            PXOR(AT(i, chunk->p), AT(i, j));
-        }
-    }
-    Packet syndrome;
-    PZERO(syndrome);
-    for (int i = 0; i < chunk->p - 1; ++i) {
-        PXOR(syndrome, AT(i, chunk->p - 1 - i));
-    }
-    for (int i = 0; i < chunk->p - 1; ++i) {
-        PASGN(AT(i, chunk->p + 1), syndrome);
-    }
-    for (int j = 0; j < chunk->p; ++j) {
-        for (int i = 0; i < chunk->p - 1; ++i) {
-            if (i + j != chunk->p - 1) {
-                PXOR(AT((i + j) % chunk->p, chunk->p + 1), AT(i, j));
-            }
-        }
-    }
     return Success;
 }
 
