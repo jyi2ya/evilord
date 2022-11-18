@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -xe
+set -e
 
 cd "$(dirname "$0")/.." || exit 1
 sh compile.sh -fsanitize=address -Og -g
@@ -34,6 +34,7 @@ deploy() {
         ../evenodd write test.bin "$p" &
         ../evenodd write test2.bin "$p" &
 
+        wait
         bad1=$((RANDOM % (p + 2)))
         rm -rf "disk_$bad1" &
 
