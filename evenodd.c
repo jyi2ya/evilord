@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <assert.h>
 #include <errno.h>
 
 #include <sys/stat.h>
@@ -21,9 +22,10 @@ typedef enum {
     Success = 0,
     ETooManyCorruptions,
     EUnimplemented,
+    ECheckFail,
 } Error;
 
-typedef uint8_t Packet;
+typedef uint64_t Packet;
 #define PXOR(x, y) do { \
     (x) ^= (y); \
 } while (0)
@@ -56,32 +58,80 @@ Chunk *chunk_new(int p) {
     return chunk_init(result, p);
 }
 
-#define ATR(row, column) ((row) == chunk->p - 1 ? 0 : chunk->data[(column) * (chunk->p - 1) + (row)])
+#define ATR(row, column) (((row) == (chunk->p - 1)) ? 0 \
+        : (chunk->data[(column) * (chunk->p - 1) + (row)]))
 #define AT(row, column) (chunk->data[(column) * (chunk->p - 1) + (row)])
+#define M(x) (((x) % m + m) % m)
+Error check_chunk(Chunk *chunk) {
+    Packet S;
+    PZERO(S);
+    int m = chunk->p;
+    for (int t = 1; t <= m - 1; ++t)
+        PXOR(S, ATR(m - 1 - t, t));
+    for (int i = 0; i <= m - 2; ++i) {
+        Packet S1;
+        PASGN(S1, ATR(i, m + 1));
+        for (int j = 0; j <= m - 1; ++j) {
+            PXOR(S1, ATR(M(i - j), j));
+        }
+        if (S1 != S) {
+            fprintf(stderr, "check chunk: diagonal %d/%d broken\n", i, m - 1);
+            return ECheckFail;
+        }
+    }
+
+    PZERO(S);
+    for (int i = 0; i <= m - 2; ++i) {
+        for (int j = 0; j <= m; ++j) {
+            PXOR(S, ATR(i, j));
+        }
+        if (S != 0) {
+            fprintf(stderr, "check chunk: row %d/%d broken\n", i, m - 1);
+            return ECheckFail;
+        }
+    }
+    return Success;
+}
+
+#define check_chunk(chunk) do { \
+    if (check_chunk(chunk) != Success) { \
+        fprintf(stderr, "check_chunk failed at line %d\n", __LINE__); \
+        abort(); \
+    } \
+} while (0)
+
+Error cook_chunk_r1(Chunk *chunk) {
+    int m = chunk->p;
+    for (int l = 0; l <= m - 2; ++l) {
+        PZERO(AT(l, m));
+        for (int t = 0; t <= m - 1; ++t) {
+            PXOR(AT(l, m), AT(l, t));
+        }
+    }
+    return Success;
+}
+
+Error cook_chunk_r2(Chunk *chunk) {
+    Packet S;
+    PZERO(S);
+    int m = chunk->p;
+    for (int t = 1; t <= m - 1; ++t)
+        PXOR(S, ATR(m - 1 - t, t));
+    for (int l = 0; l <= m - 2; ++l) {
+        PASGN(AT(l, m + 1), S);
+        for (int t = 0; t <= m - 1; ++t) {
+            PXOR(AT(l, m + 1), ATR(M(l - t), t));
+        }
+    }
+    return Success;
+}
+
 Error cook_chunk(Chunk *chunk) {
-    for (int i = 0; i < chunk->p - 1; ++i) {
-        PZERO(AT(i, chunk->p));
-    }
-    for (int j = 0; j < chunk->p; ++j) {
-        for (int i = 0; i < chunk->p - 1; ++i) {
-            PXOR(AT(i, chunk->p), AT(i, j));
-        }
-    }
-    Packet syndrome;
-    PZERO(syndrome);
-    for (int i = 0; i < chunk->p - 1; ++i) {
-        PXOR(syndrome, AT(i, chunk->p - 1 - i));
-    }
-    for (int i = 0; i < chunk->p - 1; ++i) {
-        PASGN(AT(i, chunk->p + 1), syndrome);
-    }
-    for (int j = 0; j < chunk->p; ++j) {
-        for (int i = 0; i < chunk->p - 1; ++i) {
-            if (i + j != chunk->p - 1) {
-                PXOR(AT((i + j) % chunk->p, chunk->p + 1), AT(i, j));
-            }
-        }
-    }
+    cook_chunk_r1(chunk);
+    cook_chunk_r2(chunk);
+#ifndef NDEBUG
+    check_chunk(chunk);
+#endif
     return Success;
 }
 
@@ -104,99 +154,100 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
                 }
             }
         } else {
-            cook_chunk(chunk);
+            cook_chunk_r2(chunk);
         }
     // both are broken
     } else {
 #define min(x, y) ((x) < (y) ? (x) : (y))
 #define max(x, y) ((x) > (y) ? (x) : (y))
-#define mod_group(x, m) ((x % m + m) % (m))
         int i = min(bad_disks[0], bad_disks[1]);
         int j = max(bad_disks[0], bad_disks[1]);
-        int p = chunk->p;
-        if (i == p && j == p + 1) {
+        int m = chunk->p;
+        if (i == m && j == m + 1) {
             // reconstruction
             cook_chunk(chunk);
-        } else if (i < p && j == p) {
-            unimplemented();
+        } else if (i < m && j == m) {
             // calculate S
-            Packet S = ATR(mod_group(i - 1, p), p + 1);
-            for (int l = 0; l < p; ++l) {
-                PXOR(S, ATR(mod_group(i - l - 1, p), l));
+            Packet S;
+            PASGN(S, ATR(M(i - 1), m + 1));
+            for (int l = 0; l <= m - 1; ++l) {
+                PXOR(S, ATR(M(i - 1 - l), l));
             }
+
             // recover column i
-            for (int k = 0; k < p - 1; ++k) {
-                AT(k, i) = S;
-                PXOR(AT(k, i), ATR(mod_group(i - 1, p), p + 1));
-                for (int l = 0; l < p; ++l) {
+            for (int k = 0; k <= m - 2; ++k) {
+                PASGN(AT(k, i), S);
+                PXOR(AT(k, i), ATR(M(i + k), m + 1));
+                for (int l = 0; l <= m - 1; ++l) {
                     if (l == i)
                         continue;
-                    PXOR(AT(k, i), ATR(mod_group(k + i - l, p), l));
+                    PXOR(AT(k, i), ATR(M(k + i - l), l));
                 }
             }
-            // recover column j
-            // just reconstruction
-            cook_chunk(chunk);
-        } else if (i < p && j == p + 1) {
-            for (int k = 0; k < chunk->p - 1; ++k)
+            cook_chunk_r1(chunk);
+        } else if (i < m && j == m + 1) {
+            for (int k = 0; k < m - 1; ++k)
                 PZERO(AT(k, i));
-            for (int j = 0; j <= chunk->p; ++j) {
+            for (int j = 0; j <= m; ++j) {
                 if (j == i) {
                     continue;
                 }
-                for (int k = 0; k < chunk->p - 1; ++k) {
+                for (int k = 0; k < m - 1; ++k) {
                     PXOR(AT(k, i), AT(k, j));
                 }
             }
-            cook_chunk(chunk);
-        } else { // i < p and j < p
+            cook_chunk_r2(chunk);
+        } else { // i < m and j < m
             // calculate S
             unimplemented();
             Packet S = 0;
-            for (int l = 0; l < p - 1; ++l) {
-                PXOR(S, AT(l, p));
+            for (int l = 0; l < m - 1; ++l) {
+                PXOR(S, AT(l, m));
             }
-            for (int l = 0; l < p - 1; ++l) {
-                PXOR(S, AT(l, p + 1));
+            for (int l = 0; l < m - 1; ++l) {
+                PXOR(S, AT(l, m + 1));
             }
             // horizontal syndromes S0
             // diagonal syndromes S1
-            Packet *S0 = malloc(p * sizeof(Packet));
-            Packet *S1 = malloc(p * sizeof(Packet));
-            for (int u = 0; u < p; ++u) {
+            Packet *S0 = malloc(m * sizeof(Packet));
+            Packet *S1 = malloc(m * sizeof(Packet));
+            for (int u = 0; u < m; ++u) {
                 Packet n = 0;
-                for (int l = 0; l <= p; ++l) {
+                for (int l = 0; l <= m; ++l) {
                     if (l == i || l == j)
                         continue;
                     PXOR(n, ATR(u, l));
                 }
                 S0[u] = n;
             }
-            for (int u = 0; u < p; ++u) {
+            for (int u = 0; u < m; ++u) {
                 Packet n = S;
-                PXOR(n, ATR(u, p + 1));
-                for (int l = 0; l < p; ++l) {
+                PXOR(n, ATR(u, m + 1));
+                for (int l = 0; l < m; ++l) {
                     if (l == i || l == j)
                         continue;
-                    PXOR(n, ATR(mod_group(u - l, p), l));
+                    PXOR(n, ATR(M(u - l), l));
                 }
                 S1[u] = n;
             }
-            int s = mod_group(-(j - i) - 1, p);
-            for (int l = 0; l < p; ++l) {
-                AT(p - 1, l) = 0;
+            int s = M(-(j - i) - 1);
+            for (int l = 0; l < m; ++l) {
+                AT(m - 1, l) = 0;
             }
-            while (s != p - 1) {
-                AT(s, j) = S1[mod_group(j + s, p)];
-                PXOR(AT(s, j), AT(mod_group(s + (j - i), p), i));
+            while (s != m - 1) {
+                AT(s, j) = S1[M(j + s)];
+                PXOR(AT(s, j), AT(M(s + (j - i)), i));
                 AT(s, i) = S0[s];
                 PXOR(AT(s, i), AT(s, j));
-                s = mod_group(s - (j - i), p);
+                s = M(s - (j - i));
             }
             free(S0);
             free(S1);
         }
     }
+#ifndef NDEBUG
+    check_chunk(chunk);
+#endif
 
     return Success;
 }
@@ -223,6 +274,9 @@ Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
+#ifndef NDEBUG
+    check_chunk(chunk);
+#endif
     for (int i = 0; i < disk_num; ++i) {
         fwrite(data, sizeof(Packet), items_per_disk, files[i]);
         data += items_per_disk;
@@ -233,6 +287,9 @@ Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
 Error write_cooked_chunk_to_bad_disk(Chunk *chunk, int bad_disks[2], FILE *bad_disk_fp[2]) {
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
+#ifndef NDEBUG
+    check_chunk(chunk);
+#endif
     for (int i = 0; i < 2; ++i) {
         if (bad_disks[i] != -1) {
             fwrite(data + items_per_disk * bad_disks[i], sizeof(Packet), items_per_disk, bad_disk_fp[i]);
@@ -258,9 +315,12 @@ Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
             memset(data, 0, items_per_disk * sizeof(Packet));
         } else {
             size_t ok = fread(data, 1, sizeof(Packet) * items_per_disk, files[i]);
+#ifndef NDEBUG
             if (ok < items_per_disk * sizeof(Packet)) {
-                memset((char *)data + ok, 0, items_per_disk * sizeof(Packet) - ok);
+                fprintf(stderr, "bad read at line %d, read %zu bytes\n", __LINE__, ok);
+                abort();
             }
+#endif
         }
         data += items_per_disk;
     }
@@ -268,6 +328,10 @@ Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
     if (bad_disk_num != 0) {
         return try_repair_chunk(chunk, bad_disks);
     }
+
+#ifndef NDEBUG
+    check_chunk(chunk);
+#endif
 
     return Success;
 }
