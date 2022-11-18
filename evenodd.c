@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
 #include <sys/stat.h>
 #include <linux/limits.h>
@@ -92,7 +93,9 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
     // just the second disk is broken
     if (bad_disks[1] == -1) {
         if (bad_disks[0] <= chunk->p) {
-            for (int j = 0; j < chunk->p + 1; ++j) {
+            for (int i = 0; i < chunk->p - 1; ++i)
+                PZERO(AT(i, bad_disks[0]));
+            for (int j = 0; j <= chunk->p; ++j) {
                 if (j == bad_disks[0]) {
                     continue;
                 }
@@ -115,6 +118,7 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
             // reconstruction
             cook_chunk(chunk);
         } else if (i < p && j == p) {
+            unimplemented();
             // calculate S
             Packet S = ATR(mod_group(i - 1, p), p + 1);
             for (int l = 0; l < p; ++l) {
@@ -134,10 +138,20 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
             // just reconstruction
             cook_chunk(chunk);
         } else if (i < p && j == p + 1) {
-            // just reconstruction
+            for (int k = 0; k < chunk->p - 1; ++k)
+                PZERO(AT(k, i));
+            for (int j = 0; j <= chunk->p; ++j) {
+                if (j == i) {
+                    continue;
+                }
+                for (int k = 0; k < chunk->p - 1; ++k) {
+                    PXOR(AT(k, i), AT(k, j));
+                }
+            }
             cook_chunk(chunk);
         } else { // i < p and j < p
             // calculate S
+            unimplemented();
             Packet S = 0;
             for (int l = 0; l < p - 1; ++l) {
                 PXOR(S, AT(l, p));
