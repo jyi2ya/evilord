@@ -124,7 +124,7 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
             for (int k = 0; k < p - 1; ++k) {
                 AT(k, i) = S;
                 PXOR(AT(k, i), ATR(mod_group(i - 1, p), p + 1));
-                for (int l = 0; l < p; ++p) {
+                for (int l = 0; l < p; ++l) {
                     if (l == i)
                         continue;
                     PXOR(AT(k, i), ATR(mod_group(k + i - l, p), l));
