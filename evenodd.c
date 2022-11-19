@@ -25,19 +25,76 @@ typedef enum {
     ECheckFail,
 } Error;
 
+/**
+ * Packet - 进行运算的单位数据
+ *
+ * 本算法对数据的存储皆通过 Packet 完成。
+ *
+ * Packet 可以为任意类型，只要其正确实现 PXOR PZERO PASGN 三个宏。
+ *
+ * 目前所采用的 Packet 为 uint64_t 类型。测试发现使用 __uint128_t 类型时，性能
+ * 无明显改观（在超快的集群上对性能提升仅有 5.4%），且可能引用潜在的对编译器版
+ * 本的依赖的问题。故目前使用 uint64_t。
+ */
 typedef uint64_t Packet;
+
+/**
+ * PXOR() - 异或两个 Packet，并且保存到前者
+ */
 #define PXOR(x, y) do { \
     (x) ^= (y); \
 } while (0)
+
+/**
+ * PZERO() - 将某个 Packet 置零
+ */
 #define PZERO(x) do { \
     (x) = 0; \
 } while (0)
+
+/**
+ * PASGN() - Packet 赋值操作
+ */
 #define PASGN(x, y) do { \
     (x) = (y); \
 } while (0)
+
+/**
+ * PMAX - evenodd 算法所使用的质数的最大值
+ */
 #define PMAX (101)
 
-
+/**
+ * Chunk - 实现校验与恢复功能的基本单位。
+ *
+ * @p - Chunk 所使用的质数
+ * @data - Chunk 保存数据所使用的空间，是零长数组，共有 (p+2) * (p-1) 项，
+ *         是 p+2 行 p-1 列的 Packet 矩阵。
+ *
+ * Chunk 分为两种，分别为 raw chunk 和 cooked chunk。raw chunk 为原始数据，两
+ * 个冗余列并未包括其中。cooked chunk 同时包含原始数据和冗余列，有效数据的大小
+ * 比 raw chunk 大。
+ *
+ * 本实现中未显示区分 raw chunk 和 cooked chunk，而是通过调整内存布局，使得
+ * cooked chunk 的开头一块内存正好是其所对应的 raw chunk。这是基于如下考虑：
+ * raw chunk 与 cooked chunk 之间的转换会经常进行，而两者有大量可复用的数据。
+ * 为减少内存分配，降低内存管理难度以及优化性能，选择这种实现方法。
+ *
+ * 对于 raw chunk 来说，将 data 视为一维数组，取其前 sizeof(Packet) * p * (p-1)
+ * 个字节即为原始文件的部分内容。对于 cooked chunk 来说，将 data 视为 (p+2) 行
+ * 的二维数组，每行长度为 sizeof(Packet) * (p-1) 。第 i 行即为编号为 i 的磁盘中
+ * 所保存的内容。
+ *
+ * 原始论文中，类似 Chunk 中 data 的结构被描述为 p-1 行 p+2 列的矩阵。为了获得
+ * “cooked chunk 开头一块内存即为其对应的 raw chunk” 这一性质，我们对矩阵进行
+ * 了一次转置。所以 data 应被解释为 p+2 行 p-1 列的矩阵。
+ *
+ * 在结构体中使用零长数组，是为了方便内存管理和 Chunk 复制。除此之外，此处零长
+ * 数组与指针相比并无优势。
+ *
+ * 零长数组导致 Chunk 的大小无法在编译时知晓。所以对 Chunk 的操作均应使用指向
+ * chunk 的指针进行。
+ */
 typedef struct {
     int p;
     Packet data[];
@@ -48,24 +105,63 @@ Chunk *chunk_init(Chunk *chunk, int p) {
     return chunk;
 }
 
+/**
+ * chunk_size() - 计算 chunk 结构体的大小
+ */
 size_t chunk_size(int p) {
     size_t num = (p + 2) * (p - 1);
     return sizeof(Chunk) + sizeof(Packet) * num;
 }
 
+/**
+ * chunk_new() - 新建 chunk
+ *
+ * 会分配内存，返回指向 Chunk 的指针，由调用者释放。
+ *
+ * 一旦 p 确定，则 cooked chunk 和 raw chunk 的大小就确定了。所以对 Chunk 初始
+ * 化时，需要提供 p 作为参数。
+ */
 Chunk *chunk_new(int p) {
     Chunk *result = (Chunk *)malloc(chunk_size(p));
     return chunk_init(result, p);
 }
 
+/**
+ * AT() - 获取 chunk 中 data 矩阵的某行某列
+ * @row - 行号
+ * @column - 列号
+ *
+ * 计算结果为左值。
+ *
+ * 为了方便抄论文，此处的行与列为论文中的原始矩阵的行和列，而不是实际上存储的
+ * 转置后的矩阵的行和列。计算过程中，会自动完成由原始矩阵行列到实际矩阵行列的
+ * 转换。
+ */
+#define AT(row, column) (chunk->data[(column) * (chunk->p - 1) + (row)])
+
+/**
+ * ATR() - 获取 chunk 中 data 矩阵的某行某列
+ *
+ * 计算结果为右值。
+ *
+ * 论文中临时给矩阵多加了全零的一行，以方便描述算法。其规定第 p-1 行的所有元素
+ * 皆为零。此时如果使用 AT() 宏会出现非法内存访问的错误，因此应当使用 ATR() 进
+ * 行计算。在 row < p-1 时，行为与 AT() 一致。
+ */
 #define ATR(row, column) (((row) == (chunk->p - 1)) ? 0 \
         : (chunk->data[(column) * (chunk->p - 1) + (row)]))
-#define AT(row, column) (chunk->data[(column) * (chunk->p - 1) + (row)])
+
+/**
+ * M() - 对 m 取模
+ */
 #define M(x) (((x) % m + m) % m)
+
 Error check_chunk(Chunk *chunk) {
+    int m = chunk->p;
+
+    /* 检查对角线是否合法 */
     Packet S;
     PZERO(S);
-    int m = chunk->p;
     for (int t = 1; t <= m - 1; ++t)
         PXOR(S, ATR(m - 1 - t, t));
     for (int i = 0; i <= m - 2; ++i) {
@@ -80,6 +176,7 @@ Error check_chunk(Chunk *chunk) {
         }
     }
 
+    /* 检查各行异或值是否正确 */
     PZERO(S);
     for (int i = 0; i <= m - 2; ++i) {
         for (int j = 0; j <= m; ++j) {
@@ -93,13 +190,24 @@ Error check_chunk(Chunk *chunk) {
     return Success;
 }
 
+/**
+ * check_chunk() - 检查 Chunk 的合法性
+ *
+ * 失败时退出。
+ *
+ * 函数会检查 Chunk 是否出错，并报告出错的是对角线还是行。
+ * 该函数应该仅在 DEBUG 模式下使用，以测试算法的正确性。
+ */
 #define check_chunk(chunk) do { \
     if (check_chunk(chunk) != Success) { \
-        fprintf(stderr, "check_chunk failed at line %d\n", __LINE__); \
+        fprintf(stderr, "check_chunk() failed at line %d\n", __LINE__); \
         abort(); \
     } \
 } while (0)
 
+/**
+ * cook_chunk_r1() - 计算第一列校验值，即原始数据每行的异或值。
+ */
 Error cook_chunk_r1(Chunk *chunk) {
     int m = chunk->p;
     for (int l = 0; l <= m - 2; ++l) {
@@ -111,6 +219,9 @@ Error cook_chunk_r1(Chunk *chunk) {
     return Success;
 }
 
+/**
+ * cook_chunk_r2() - 计算第二列校验值，即各种对角线神奇魔法算出来的值。
+ */
 Error cook_chunk_r2(Chunk *chunk) {
     Packet S;
     PZERO(S);
@@ -126,6 +237,9 @@ Error cook_chunk_r2(Chunk *chunk) {
     return Success;
 }
 
+/**
+ * cook_chunk() - 计算校验值。
+ */
 Error cook_chunk(Chunk *chunk) {
     cook_chunk_r1(chunk);
     cook_chunk_r2(chunk);
@@ -135,14 +249,27 @@ Error cook_chunk(Chunk *chunk) {
     return Success;
 }
 
+/**
+ * try_repair_chunk() - 尝试修复 chunk
+ *
+ * @chunk - 待修复的 chunk
+ * @bad_disks[2] - 损坏的磁盘编号，-1 代表无磁盘损坏
+ *                 如果所有磁盘均损坏，则两个元素皆为 -1
+ *                 如果仅有一个磁盘损坏，则第一个元素为非负整数，第二个元素为 -1
+ *                 如果有两个磁盘损坏，则两个元素均为非负整数
+ *
+ * 完全依照论文实验。文档参考论文。
+ */
 Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
-    // both the mentioned disks are fine
+    /* 两个磁盘都是好的 */
     if (bad_disks[0] == -1) {
         return Success;
     }
-    // just the second disk is broken
-    if (bad_disks[1] == -1) {
+
+    /* 仅一个磁盘损坏 */
+    if (bad_disks[1] == -1 || bad_disks[0] == bad_disks[1]) {
         if (bad_disks[0] <= chunk->p) {
+            /* 坏掉的磁盘是前 p+1 个，可以通过简单异或恢复 */
             for (int i = 0; i < chunk->p - 1; ++i)
                 PZERO(AT(i, bad_disks[0]));
             for (int j = 0; j <= chunk->p; ++j) {
@@ -154,97 +281,101 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
                 }
             }
         } else {
+            /* 坏掉的磁盘是魔法对角线的校验值 */
+            /* 重新计算魔法对角线的校验值 */
             cook_chunk_r2(chunk);
         }
-    // both are broken
-    } else {
+        return Success;
+    }
+
 #define min(x, y) ((x) < (y) ? (x) : (y))
 #define max(x, y) ((x) > (y) ? (x) : (y))
-        int i = min(bad_disks[0], bad_disks[1]);
-        int j = max(bad_disks[0], bad_disks[1]);
-        int m = chunk->p;
-        if (i == m && j == m + 1) {
-            // reconstruction
-            cook_chunk(chunk);
-        } else if (i < m && j == m) {
-            // calculate S
-            Packet S;
-            PASGN(S, ATR(M(i - 1), m + 1));
-            for (int l = 0; l <= m - 1; ++l) {
-                PXOR(S, ATR(M(i - 1 - l), l));
-            }
-
-            // recover column i
-            for (int k = 0; k <= m - 2; ++k) {
-                PASGN(AT(k, i), S);
-                PXOR(AT(k, i), ATR(M(i + k), m + 1));
-                for (int l = 0; l <= m - 1; ++l) {
-                    if (l == i)
-                        continue;
-                    PXOR(AT(k, i), ATR(M(k + i - l), l));
-                }
-            }
-            cook_chunk_r1(chunk);
-        } else if (i < m && j == m + 1) {
-            for (int k = 0; k < m - 1; ++k)
-                PZERO(AT(k, i));
-            for (int j = 0; j <= m; ++j) {
-                if (j == i) {
-                    continue;
-                }
-                for (int k = 0; k < m - 1; ++k) {
-                    PXOR(AT(k, i), AT(k, j));
-                }
-            }
-            cook_chunk_r2(chunk);
-        } else { // i < m and j < m
-            // calculate S
-            unimplemented();
-            Packet S = 0;
-            for (int l = 0; l < m - 1; ++l) {
-                PXOR(S, AT(l, m));
-            }
-            for (int l = 0; l < m - 1; ++l) {
-                PXOR(S, AT(l, m + 1));
-            }
-            // horizontal syndromes S0
-            // diagonal syndromes S1
-            Packet *S0 = malloc(m * sizeof(Packet));
-            Packet *S1 = malloc(m * sizeof(Packet));
-            for (int u = 0; u < m; ++u) {
-                Packet n = 0;
-                for (int l = 0; l <= m; ++l) {
-                    if (l == i || l == j)
-                        continue;
-                    PXOR(n, ATR(u, l));
-                }
-                S0[u] = n;
-            }
-            for (int u = 0; u < m; ++u) {
-                Packet n = S;
-                PXOR(n, ATR(u, m + 1));
-                for (int l = 0; l < m; ++l) {
-                    if (l == i || l == j)
-                        continue;
-                    PXOR(n, ATR(M(u - l), l));
-                }
-                S1[u] = n;
-            }
-            int s = M(-(j - i) - 1);
-            for (int l = 0; l < m; ++l) {
-                AT(m - 1, l) = 0;
-            }
-            while (s != m - 1) {
-                AT(s, j) = S1[M(j + s)];
-                PXOR(AT(s, j), AT(M(s + (j - i)), i));
-                AT(s, i) = S0[s];
-                PXOR(AT(s, i), AT(s, j));
-                s = M(s - (j - i));
-            }
-            free(S0);
-            free(S1);
+    int i = min(bad_disks[0], bad_disks[1]);
+    int j = max(bad_disks[0], bad_disks[1]);
+    int m = chunk->p;
+    if (i == m && j == m + 1) {
+        /* 损坏的是两个保存校验值的磁盘 */
+        cook_chunk(chunk);
+    } else if (i < m && j == m) {
+        /* 损坏的是一块原始数据磁盘，和保存每行异或校验值的磁盘 */
+        Packet S;
+        PASGN(S, ATR(M(i - 1), m + 1));
+        for (int l = 0; l <= m - 1; ++l) {
+            PXOR(S, ATR(M(i - 1 - l), l));
         }
+
+        // recover column i
+        for (int k = 0; k <= m - 2; ++k) {
+            PASGN(AT(k, i), S);
+            PXOR(AT(k, i), ATR(M(i + k), m + 1));
+            for (int l = 0; l <= m - 1; ++l) {
+                if (l == i)
+                    continue;
+                PXOR(AT(k, i), ATR(M(k + i - l), l));
+            }
+        }
+        cook_chunk_r1(chunk);
+    } else if (i < m && j == m + 1) {
+        /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
+        for (int k = 0; k < m - 1; ++k)
+            PZERO(AT(k, i));
+        for (int j = 0; j <= m; ++j) {
+            if (j == i) {
+                continue;
+            }
+            for (int k = 0; k < m - 1; ++k) {
+                PXOR(AT(k, i), AT(k, j));
+            }
+        }
+        cook_chunk_r2(chunk);
+    } else { // i < m and j < m
+        /* 损坏的是两块原始数据磁盘 */
+        unimplemented();
+        Packet S = 0;
+        for (int l = 0; l < m - 1; ++l) {
+            PXOR(S, AT(l, m));
+        }
+        for (int l = 0; l < m - 1; ++l) {
+            PXOR(S, AT(l, m + 1));
+        }
+        // horizontal syndromes S0
+        // diagonal syndromes S1
+        Packet *S0 = malloc(m * sizeof(Packet));
+        Packet *S1 = malloc(m * sizeof(Packet));
+        for (int u = 0; u < m; ++u) {
+            Packet n = 0;
+            for (int l = 0; l <= m; ++l) {
+                if (l == i || l == j)
+                    continue;
+                PXOR(n, ATR(u, l));
+            }
+            S0[u] = n;
+        }
+        for (int u = 0; u < m; ++u) {
+            Packet n = S;
+            PXOR(n, ATR(u, m + 1));
+            for (int l = 0; l < m; ++l) {
+                if (l == i || l == j)
+                    continue;
+                PXOR(n, ATR(M(u - l), l));
+            }
+            S1[u] = n;
+        }
+        int s = M(-(j - i) - 1);
+        for (int l = 0; l < m; ++l) {
+            AT(m - 1, l) = 0;
+        }
+        while (s != m - 1) {
+            AT(s, j) = S1[M(j + s)];
+            PXOR(AT(s, j), AT(M(s + (j - i)), i));
+            AT(s, i) = S0[s];
+            PXOR(AT(s, i), AT(s, j));
+            s = M(s - (j - i));
+        }
+        free(S0);
+        free(S1);
     }
+
 #ifndef NDEBUG
     check_chunk(chunk);
 #endif
@@ -252,17 +383,35 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
     return Success;
 }
 
+/**
+ * write_raw_chunk_limited() - 将 raw chunk 写入文件，并且限制写入长度
+ *
+ * 原始文件大小经常不能被 p * (p-1) 整除，导致最后一个 chunk 通常不会全为有效
+ * 数据。此函数用于处理原始文件的最后一个 chunk，仅写入有效数据的部分。有效数
+ * 据的大小由调用者根据其他信息计算。
+ */
 Error write_raw_chunk_limited(Chunk *chunk, FILE *file, size_t limit) {
     fwrite(chunk->data, 1, limit, file);
     return Success;
 }
 
+/**
+ * write_raw_chunk() - 将 raw chunk 写入文件
+ */
 Error write_raw_chunk(Chunk *chunk, FILE *file) {
     size_t num = chunk->p * (chunk->p - 1);
     fwrite(chunk->data, sizeof(Packet), num, file);
     return Success;
 }
 
+/**
+ * read_raw_chunk() - 读取文件的部分字节到 chunk
+ *
+ * 该函数会尝试读取尽可能多的数据到 chunk 中。
+ *
+ * 原始文件大小经常不能被 p * (p-1) 整除，导致最后一个 chunk 通常不能读取到足
+ * 够的数据。此处我们约定，未完全填满的 chunk 其余字节皆为 0。
+ */
 Error read_raw_chunk(Chunk *chunk, FILE *file) {
     size_t num = chunk->p * (chunk->p - 1);
     size_t ok = fread(chunk->data, 1, sizeof(Packet) * num, file);
@@ -270,6 +419,14 @@ Error read_raw_chunk(Chunk *chunk, FILE *file) {
     return Success;
 }
 
+/**
+ * write_cooked_chunk() - 将 chunk 写入到 raid 中
+ *
+ * @chunk - 待写入的 chunk
+ * @files - 各个磁盘的文件指针，至少有 p+2 项
+ *
+ * 调用者应保证 chunk 合法，以及 files[] 数组及其内文件指针有效。
+ */
 Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
@@ -284,6 +441,17 @@ Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
     return Success;
 }
 
+/**
+ * write_cooked_chunk_to_bad_disk() - 将 chunk 写入到 raid 中，但是仅写入两个磁盘
+ *
+ * @chunk - 待写入的 chunk
+ * @bad_disks - 待写入的磁盘的 id。非负整数表示需要写入，-1 表示无需处理。
+ * @bad_disk_fp - 待写入的磁盘文件指针
+ *
+ * 调用者应保证 bad_disks[] 和 bad_disk_fp[] 合法，以及它们之间的元素一一对应。
+ *
+ * 用于将修复后的 chunk 写入坏掉的磁盘中。
+ */
 Error write_cooked_chunk_to_bad_disk(Chunk *chunk, int bad_disks[2], FILE *bad_disk_fp[2]) {
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
@@ -298,6 +466,15 @@ Error write_cooked_chunk_to_bad_disk(Chunk *chunk, int bad_disks[2], FILE *bad_d
     return Success;
 }
 
+/**
+ * read_cooked_chunk() - 从 raid 中读取 chunk，并且尝试修复 chunk。
+ *
+ * @chunk - 存放数据的 chunk
+ * @files - 待读取的磁盘的文件指针。应该保证至少有 p+2 项。
+ *          用 NULL 指代损坏的磁盘。
+ *
+ * 该函数并不会将修复的结果写回到磁盘中，且对读取到的 chunk 不合法的情况不做处理。
+ */
 Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
@@ -336,6 +513,20 @@ Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
     return Success;
 }
 
+/**
+ * Metadata - raid 中存放的关于原始文件的元数据
+ *
+ * @p - 所使用的质数。不同文件存放时，可能会指定不同的质数。
+ * @size - 文件长度。文件在 raid 中以 chunk 为单位存储，文件长度不一定能被其大小整除。
+ * @full_chunk_num - 为存放文件，需要填满的 chunk 的数量。实际使用的 chunk 数量可能比该值多 1。
+ * @last_chunk_data_size - 文件长度不能被 chunk 大小整除时，未满的 chunk 中所填入的数据长度。
+ *
+ * 对每个文件，其 Metadata 是唯一确定的。
+ * Metadta 会被存放在 raid 中每个存储文件的开头（也即，保存 p+2 次）。虽然严格
+ * 来说，仅需在编号为 0 1 和 2 的三个磁盘中存储 Metadata 即可保证在任何情况下
+ * 都能获取到 Metadata，但是为了统一磁盘操作，简化编码，我们选择在每个磁盘都
+ * 存储一份。
+ */
 typedef struct {
     int p;
     size_t size;
@@ -343,15 +534,28 @@ typedef struct {
     size_t last_chunk_data_size;
 } Metadata;
 
+/**
+ * skip_metadata() - 跳过文件中的 Metadata
+ *
+ * 调用者需要保证文件正确打开，且其中确实有 Metadata
+ */
 void skip_metadata(FILE *file) {
     Metadata data;
     fread(&data, sizeof(data), 1, file);
 }
 
+/**
+ * write_metadata() - 将 Metadata 写入文件
+ */
 void write_metadata(Metadata data, FILE *file) {
     fwrite(&data, sizeof(data), 1, file);
 }
 
+/**
+ * get_raw_file_metadata() - 获取原始文件的 Metadata
+ *
+ * 调用者应保证原始文件存在。
+ */
 Metadata get_raw_file_metadata(const char *filename, int p) {
     Metadata result;
     FILE *fp = fopen(filename, "rb");
@@ -364,8 +568,13 @@ Metadata get_raw_file_metadata(const char *filename, int p) {
     return result;
 }
 
+/**
+ * get_cooked_file_metadata() - 从 raid 中获取文件的 Metadata
+ */
 Metadata get_cooked_file_metadata(const char *filename) {
     Metadata result;
+
+    /* 尝试磁盘 0 1 和 2 ，从第一个成功打开的磁盘中读取文件的 Metadata */
     for (int i = 0; i < 3; ++i) {
         char path[PATH_MAX];
         sprintf(path, "disk_%d/%s", i, filename);
@@ -379,20 +588,29 @@ Metadata get_cooked_file_metadata(const char *filename) {
     return result;
 }
 
+/**
+ * read_file() - 题目规定的 read 操作实现
+ */
 void read_file(const char *filename, const char *save_as) {
     FILE *out = fopen(save_as, "wb");
     FILE *in[PMAX + 2]; // FIXME: dirty hack
+
+    /* 从 raid 中获取文件的 Metadata */
     Metadata meta = get_cooked_file_metadata(filename);
     int p = meta.p;
 
+    /* 打开文件所保存的 p+2 个磁盘 */
     for (int i = 0; i < p + 2; ++i) {
         char path[PATH_MAX];
         sprintf(path, "disk_%d/%s", i, filename);
         in[i] = fopen(path, "rb");
+
+        /* 跳过磁盘开头的 Metadata */
         if (in[i] != NULL)
             skip_metadata(in[i]);
     }
 
+    /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
     Chunk *chunk = chunk_new(p);
     for (int i = 0; i < meta.full_chunk_num; ++i) {
         read_cooked_chunk(chunk, in);
@@ -405,11 +623,17 @@ void read_file(const char *filename, const char *save_as) {
     free(chunk);
 }
 
+/**
+ * write_file() - 题目规定的 write 操作实现
+ */
 void write_file(const char *file_to_read, int p) {
     FILE *in = fopen(file_to_read, "rb");
     FILE *out[PMAX + 2]; // FIXME: dirty hack
+
+    /* 获取文件的 Metadata */
     Metadata meta = get_raw_file_metadata(file_to_read, p);
 
+    /* 准备保存文件所需要的 p+2 个磁盘 */
     for (int i = 0; i < p + 2; ++i) {
         char path[PATH_MAX];
         sprintf(path, "disk_%d", i);
@@ -419,6 +643,7 @@ void write_file(const char *file_to_read, int p) {
         write_metadata(meta, out[i]);
     }
 
+    /* 读取文件，计算校验和并且存盘 */
     Chunk *chunk = chunk_new(p);
     for (int i = 0; i < meta.full_chunk_num; ++i) {
         read_raw_chunk(chunk, in);
@@ -433,25 +658,30 @@ void write_file(const char *file_to_read, int p) {
     free(chunk);
 }
 
+/**
+ * repair_file() - 题目规定的 repair 操作实现
+ */
 void repair_file(const char *fname, int bad_disks[2]) {
     FILE *in[PMAX + 2]; // FIXME: dirty hack
     FILE *out[2] = { NULL, NULL };
     char path[PATH_MAX];
+
+    /* 从 raid 中读取文件的 Metadata */
     Metadata meta = get_cooked_file_metadata(fname);
 
-    if (bad_disks[0] == bad_disks[1]) {
-        bad_disks[1] = -1;
-    }
-
+    /* 打开文件所保存的 p+2 个磁盘 */
     for (int i = 0; i < meta.p + 2; ++i) {
         sprintf(path, "disk_%d", i);
         mkdir(path, 0755);
         sprintf(path, "disk_%d/%s", i, fname);
         in[i] = fopen(path, "rb");
+
+        /* 跳过磁盘开头的 Metadata */
         if (in[i] != NULL)
             skip_metadata(in[i]);
     }
 
+    /* 重建损坏的两个磁盘，并且打开准备写入 */
     for (int i = 0; i < 2; ++i) {
         if (bad_disks[i] != -1) {
             sprintf(path, "disk_%d/%s", bad_disks[i], fname);
@@ -460,6 +690,7 @@ void repair_file(const char *fname, int bad_disks[2]) {
         }
     }
 
+    /* 从 raid 中读取文件，计算校验和并且将数据写入到待重建的磁盘上 */
     Chunk *chunk = chunk_new(meta.p);
     for (int i = 0; i < meta.full_chunk_num; ++i) {
         read_cooked_chunk(chunk, in);
@@ -472,12 +703,18 @@ void repair_file(const char *fname, int bad_disks[2]) {
     free(chunk);
 }
 
+/**
+ * usage() - 最无聊的函数
+ */
 void usage() {
     printf("./evenodd write <file_name> <p>\n");
     printf("./evenodd read <file_name> <save_as>\n");
     printf("./evenodd repair <number_erasures> <idx0> ...\n");
 }
 
+/**
+ * main() - 次无聊的函数
+ */
 int main(int argc, char** argv) {
     if (argc < 2) {
         usage();
