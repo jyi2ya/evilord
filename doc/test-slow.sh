@@ -58,13 +58,13 @@ for failtype in  \
 	; do
 	echo "testing: $failtype"
 
-	for filesize in 1 2 4 8 16 32 64 128; do
-		filesize=$((filesize * 9981))
+	for filesize in 1 2 3 4 5; do
 		echo filesize is "$filesize"
 		deploy
 	done
 
-	for filesize in 1 2 3 4 5; do
+	for filesize in 1 2 4 8 16 32 64 128; do
+		filesize=$((filesize * 9981))
 		echo filesize is "$filesize"
 		deploy
 	done

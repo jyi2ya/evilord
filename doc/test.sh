@@ -11,7 +11,7 @@ deploy() {
     dd status=none if=/dev/urandom of=test.bin bs="$filesize" count=1 iflag=fullblock &
     dd status=none if=/dev/urandom of=test2.bin bs="$((filesize * 3))" count=1 iflag=fullblock &
 
-    for p in 2 3 5 7 31 47 97 101; do
+    for p in 3 5 7 31 47 97 101; do
         echo p is "$p"
         rm -rf disk*
 
