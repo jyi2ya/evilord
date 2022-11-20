@@ -114,6 +114,14 @@ size_t chunk_size(int p) {
 }
 
 /**
+ * chunk_data_size() - 计算 chunk 结构体内数据的大小
+ */
+size_t chunk_data_size(int p) {
+    size_t num = (p + 2) * (p - 1);
+    return sizeof(Packet) * num;
+}
+
+/**
  * chunk_new() - 新建 chunk
  *
  * 会分配内存，返回指向 Chunk 的指针，由调用者释放。
@@ -330,48 +338,45 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
         cook_chunk_r2(chunk);
     } else { // i < m and j < m
         /* 损坏的是两块原始数据磁盘 */
-        unimplemented();
-        Packet S = 0;
-        for (int l = 0; l < m - 1; ++l) {
-            PXOR(S, AT(l, m));
-        }
-        for (int l = 0; l < m - 1; ++l) {
-            PXOR(S, AT(l, m + 1));
+        Packet S;
+        PZERO(S);
+        for (int l = 0; l <= m - 2; ++l) {
+            PXOR(S, ATR(l, m));
+            PXOR(S, ATR(l, m + 1));
         }
         // horizontal syndromes S0
         // diagonal syndromes S1
         Packet *S0 = malloc(m * sizeof(Packet));
         Packet *S1 = malloc(m * sizeof(Packet));
-        for (int u = 0; u < m; ++u) {
-            Packet n = 0;
+
+        for (int u = 0; u <= m - 1; ++u) {
+            PZERO(S0[u]);
             for (int l = 0; l <= m; ++l) {
                 if (l == i || l == j)
                     continue;
-                PXOR(n, ATR(u, l));
+                PXOR(S0[u], ATR(u, l));
             }
-            S0[u] = n;
         }
+
         for (int u = 0; u < m; ++u) {
-            Packet n = S;
-            PXOR(n, ATR(u, m + 1));
-            for (int l = 0; l < m; ++l) {
+            PASGN(S1[u], S);
+            PXOR(S1[u], ATR(u, m + 1));
+            for (int l = 0; l <= m - 1; ++l) {
                 if (l == i || l == j)
                     continue;
-                PXOR(n, ATR(M(u - l), l));
+                PXOR(S1[u], ATR(M(u - l), l));
             }
-            S1[u] = n;
         }
+
         int s = M(-(j - i) - 1);
-        for (int l = 0; l < m; ++l) {
-            AT(m - 1, l) = 0;
-        }
-        while (s != m - 1) {
+        do {
             AT(s, j) = S1[M(j + s)];
-            PXOR(AT(s, j), AT(M(s + (j - i)), i));
+            PXOR(AT(s, j), ATR(M(s + (j - i)), i));
+
             AT(s, i) = S0[s];
             PXOR(AT(s, i), AT(s, j));
             s = M(s - (j - i));
-        }
+        } while (s != m - 1);
         free(S0);
         free(S1);
     }
