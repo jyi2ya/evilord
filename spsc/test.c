@@ -30,7 +30,7 @@ int main(void) {
     for (int i = 0; i < RANDNUMSIZE; ++i) {
         randnums[i] = rand() % 100;
     }
-    fifo = SpscQueue_new(RANDNUMSIZE);
+    fifo = SpscQueue_new(100);
     pthread_t t1, t2;
     pthread_create(&t1, NULL, producer, NULL);
     pthread_create(&t2, NULL, customer, NULL);

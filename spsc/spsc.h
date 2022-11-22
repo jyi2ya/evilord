@@ -1,23 +1,25 @@
 #include <stdlib.h>
 
-#define read_barrier()  asm volatile("":::"memory")
-#define write_barrier() asm volatile("":::"memory")
+#define read_barrier()  __asm__ volatile("":::"memory")
+#define write_barrier() __asm__ volatile("":::"memory")
 
-typedef int ItemType;
+typedef void *ItemType;
 
 typedef struct {
-    unsigned int in;
-    unsigned int out;
+    volatile unsigned int in;
+    volatile unsigned int out;
     unsigned int mask;
-    ItemType *data;
+    ItemType * volatile data;
 } SpscQueue;
 
 SpscQueue SpscQueue_new(unsigned int size);
 
-void SpscQueue_drop(SpscQueue *self);
+void SpscQueue_drop(volatile SpscQueue *self);
 
-int SpscQueue_empty(const SpscQueue *self);
+int SpscQueue_empty(volatile SpscQueue *self);
 
-void SpscQueue_push(SpscQueue *self, ItemType data);
+void SpscQueue_push(volatile SpscQueue *self, ItemType data);
 
-ItemType SpscQueue_pop(SpscQueue *self);
+int SpscQueue_full(volatile SpscQueue *self);
+
+ItemType SpscQueue_pop(volatile SpscQueue *self);

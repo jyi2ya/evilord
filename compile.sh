@@ -1,5 +1,3 @@
 #!/bin/bash
 
-gcc -o evenodd evenodd.c -Wall -Wextra -Wshadow "$@"
-
-
+gcc -pthread -std=c11 -o evenodd spsc/spsc.c evenodd.c -Wall -Wextra -Wshadow "$@"

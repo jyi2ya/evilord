@@ -9,14 +9,14 @@ static unsigned int roundup_pow_two(unsigned int size) {
 
 SpscQueue SpscQueue_new(unsigned int size) {
     return (SpscQueue) {
-        .data = malloc(sizeof(ItemType) * size),
+        .data = malloc(sizeof(ItemType) * roundup_pow_two(size)),
         .in = 0,
         .out = 0,
         .mask = roundup_pow_two(size) - 1
     };
 }
 
-void SpscQueue_drop(SpscQueue *self) {
+void SpscQueue_drop(volatile SpscQueue *self) {
     free(self->data);
     *self = (SpscQueue) {
         .data = NULL,
@@ -26,11 +26,15 @@ void SpscQueue_drop(SpscQueue *self) {
     };
 }
 
-int SpscQueue_empty(const SpscQueue *self) {
+int SpscQueue_empty(volatile SpscQueue *self) {
     return self->out == self->in;
 }
 
-void SpscQueue_push(SpscQueue *self, ItemType data) {
+int SpscQueue_full(volatile SpscQueue *self) {
+    return self->in - self->out == self->mask + 1;
+}
+
+void SpscQueue_push(volatile SpscQueue *self, ItemType data) {
     while (self->in - self->out > self->mask)
         ;
     unsigned int off = self->in & self->mask;
@@ -39,7 +43,7 @@ void SpscQueue_push(SpscQueue *self, ItemType data) {
     self->in++;
 }
 
-ItemType SpscQueue_pop(SpscQueue *self) {
+ItemType SpscQueue_pop(volatile SpscQueue *self) {
     while (SpscQueue_empty(self))
         ;
     unsigned int off = self->out & self->mask;

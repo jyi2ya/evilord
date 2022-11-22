@@ -1,3 +1,4 @@
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +9,8 @@
 #include <sys/stat.h>
 #include <linux/limits.h>
 #include <dirent.h>
+
+#include "spsc/spsc.h"
 
 void panic(void) {
     abort();
@@ -388,6 +391,63 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
     return Success;
 }
 
+typedef Error (*Writer)(Chunk *, FILE **, int *);
+
+typedef struct {
+    Writer writer;
+    volatile SpscQueue *queue;
+    FILE **files;
+    int *option;
+    int times;
+} WriteCtx;
+
+typedef Error (*Reader)(Chunk *, FILE **);
+
+typedef struct {
+    Reader reader;
+    volatile SpscQueue *queue;
+    FILE **files;
+    int times;
+    int p;
+} ReadCtx;
+
+typedef struct {
+    ReadCtx readctx;
+    WriteCtx writectx;
+} IOCtx;
+
+void io_loop(ReadCtx readctx, WriteCtx writectx) {
+    while (readctx.times > 0) {
+        while (readctx.times > 0 && !SpscQueue_full(readctx.queue) && !SpscQueue_full(writectx.queue)) {
+            Chunk *chunk = chunk_new(readctx.p);
+            readctx.reader(chunk, readctx.files);
+            SpscQueue_push(readctx.queue, chunk);
+            readctx.times -= 1;
+        }
+        while (writectx.times > 0 && !SpscQueue_empty(writectx.queue) && !SpscQueue_empty(readctx.queue)) {
+            Chunk *chunk = SpscQueue_pop(writectx.queue);
+            writectx.writer(chunk, writectx.files, writectx.option);
+            free(chunk);
+            writectx.times -= 1;
+        }
+    }
+
+    while (writectx.times > 0) {
+        Chunk *chunk = SpscQueue_pop(writectx.queue);
+        writectx.writer(chunk, writectx.files, writectx.option);
+        free(chunk);
+        writectx.times -= 1;
+    }
+
+    pthread_exit(NULL);
+}
+
+void *io_thread(void *data) {
+    IOCtx *ioctx = (IOCtx *)data;
+    io_loop(ioctx->readctx, ioctx->writectx);
+    return NULL;
+}
+
 /**
  * write_raw_chunk_limited() - 将 raw chunk 写入文件，并且限制写入长度
  *
@@ -395,17 +455,17 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
  * 数据。此函数用于处理原始文件的最后一个 chunk，仅写入有效数据的部分。有效数
  * 据的大小由调用者根据其他信息计算。
  */
-Error write_raw_chunk_limited(Chunk *chunk, FILE *file, size_t limit) {
-    fwrite(chunk->data, 1, limit, file);
+Error write_raw_chunk_limited(Chunk *chunk, FILE *file[1], int limit) {
+    fwrite(chunk->data, 1, limit, file[0]);
     return Success;
 }
 
 /**
  * write_raw_chunk() - 将 raw chunk 写入文件
  */
-Error write_raw_chunk(Chunk *chunk, FILE *file) {
+Error write_raw_chunk(Chunk *chunk, FILE *file[1], int _unused[1]) {
     size_t num = chunk->p * (chunk->p - 1);
-    fwrite(chunk->data, sizeof(Packet), num, file);
+    fwrite(chunk->data, sizeof(Packet), num, file[0]);
     return Success;
 }
 
@@ -417,9 +477,9 @@ Error write_raw_chunk(Chunk *chunk, FILE *file) {
  * 原始文件大小经常不能被 p * (p-1) 整除，导致最后一个 chunk 通常不能读取到足
  * 够的数据。此处我们约定，未完全填满的 chunk 其余字节皆为 0。
  */
-Error read_raw_chunk(Chunk *chunk, FILE *file) {
+Error read_raw_chunk(Chunk *chunk, FILE **file) {
     size_t num = chunk->p * (chunk->p - 1);
-    size_t ok = fread(chunk->data, 1, sizeof(Packet) * num, file);
+    size_t ok = fread(chunk->data, 1, sizeof(Packet) * num, file[0]);
     memset((void *)chunk->data + ok, 0, (chunk->p - 1) * (chunk->p + 2) * sizeof(Packet) - ok);
     return Success;
 }
@@ -432,7 +492,7 @@ Error read_raw_chunk(Chunk *chunk, FILE *file) {
  *
  * 调用者应保证 chunk 合法，以及 files[] 数组及其内文件指针有效。
  */
-Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
+Error write_cooked_chunk(Chunk *chunk, FILE *files[], int _unused[1]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
@@ -457,7 +517,7 @@ Error write_cooked_chunk(Chunk *chunk, FILE *files[]) {
  *
  * 用于将修复后的 chunk 写入坏掉的磁盘中。
  */
-Error write_cooked_chunk_to_bad_disk(Chunk *chunk, int bad_disks[2], FILE *bad_disk_fp[2]) {
+Error write_cooked_chunk_to_bad_disk(Chunk *chunk, FILE *bad_disk_fp[2], int bad_disks[2]) {
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
 #ifndef NDEBUG
@@ -600,7 +660,9 @@ Metadata get_cooked_file_metadata(const char *filename) {
  * read_file() - 题目规定的 read 操作实现
  */
 void read_file(const char *filename, const char *save_as) {
-    FILE *out = fopen(save_as, "wb");
+    FILE *out[1] = {
+        fopen(save_as, "wb")
+    };
     FILE *in[PMAX + 2]; // FIXME: dirty hack
 
     /* 从 raid 中获取文件的 Metadata */
@@ -618,24 +680,52 @@ void read_file(const char *filename, const char *save_as) {
             skip_metadata(in[i]);
     }
 
+    volatile SpscQueue qin = SpscQueue_new(2244);
+    volatile SpscQueue qout = SpscQueue_new(2244);
+    fprintf(stderr, "%u\n", qin.mask);
+    IOCtx ioctx = {
+        .writectx = {
+            .files = out,
+            .option = NULL,
+            .queue = &qout,
+            .writer = write_raw_chunk,
+            .times = meta.full_chunk_num,
+        },
+        .readctx = {
+            .files = in,
+            .queue = &qin,
+            .p = p,
+            .reader = read_cooked_chunk,
+            .times = meta.full_chunk_num,
+        },
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, io_thread, &ioctx);
+
     /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
-    Chunk *chunk = chunk_new(p);
     for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
-        read_cooked_chunk(chunk, in);
-        write_raw_chunk(chunk, out);
+        Chunk *chunk = SpscQueue_pop(&qin);
+        SpscQueue_push(&qout, chunk);
     }
+    pthread_join(tid, NULL);
+
     if (meta.last_chunk_data_size != 0) {
+        Chunk *chunk = chunk_new(p);
         read_cooked_chunk(chunk, in);
         write_raw_chunk_limited(chunk, out, meta.last_chunk_data_size);
+        free(chunk);
     }
-    free(chunk);
+
+    SpscQueue_drop(&qin);
+    SpscQueue_drop(&qout);
 }
 
 /**
  * write_file() - 题目规定的 write 操作实现
  */
 void write_file(const char *file_to_read, int p) {
-    FILE *in = fopen(file_to_read, "rb");
+    FILE *in[1] = { fopen(file_to_read, "rb") };
     FILE *out[PMAX + 2]; // FIXME: dirty hack
 
     /* 获取文件的 Metadata */
@@ -656,12 +746,12 @@ void write_file(const char *file_to_read, int p) {
     for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
         read_raw_chunk(chunk, in);
         cook_chunk(chunk);
-        write_cooked_chunk(chunk, out);
+        write_cooked_chunk(chunk, out, NULL);
     }
     if (meta.last_chunk_data_size != 0) {
         read_raw_chunk(chunk, in);
         cook_chunk(chunk);
-        write_cooked_chunk(chunk, out);
+        write_cooked_chunk(chunk, out, NULL);
     }
     free(chunk);
 }
@@ -702,11 +792,11 @@ void repair_file(const char *fname, int bad_disks[2]) {
     Chunk *chunk = chunk_new(meta.p);
     for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
         read_cooked_chunk(chunk, in);
-        write_cooked_chunk_to_bad_disk(chunk, bad_disks, out);
+        write_cooked_chunk_to_bad_disk(chunk, out, bad_disks);
     }
     if (meta.last_chunk_data_size != 0) {
         read_cooked_chunk(chunk, in);
-        write_cooked_chunk_to_bad_disk(chunk, bad_disks, out);
+        write_cooked_chunk_to_bad_disk(chunk, out, bad_disks);
     }
     free(chunk);
 }
