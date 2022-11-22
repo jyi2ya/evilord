@@ -5,7 +5,7 @@ set -e
 exec 2>&1
 
 cd "$(dirname "$0")/.." || exit 1
-sh compile.sh -fsanitize=address -Og -g
+sh compile.sh -O2
 mkdir -p test
 cd test || exit 1
 
