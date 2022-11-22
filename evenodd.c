@@ -327,12 +327,12 @@ Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
         /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
         for (int k = 0; k < m - 1; ++k)
             PZERO(AT(k, i));
-        for (int j = 0; j <= m; ++j) {
-            if (j == i) {
+        for (int l = 0; l <= m; ++l) {
+            if (l == i) {
                 continue;
             }
             for (int k = 0; k < m - 1; ++k) {
-                PXOR(AT(k, i), AT(k, j));
+                PXOR(AT(k, i), AT(k, l));
             }
         }
         cook_chunk_r2(chunk);
@@ -496,7 +496,10 @@ Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
             bad_disks[bad_disk_num - 1] = i;
             memset(data, 0, items_per_disk * sizeof(Packet));
         } else {
-            size_t ok = fread(data, 1, sizeof(Packet) * items_per_disk, files[i]);
+#ifndef NDEBUG
+            size_t ok =
+#endif
+                fread(data, 1, sizeof(Packet) * items_per_disk, files[i]);
 #ifndef NDEBUG
             if (ok < items_per_disk * sizeof(Packet)) {
                 fprintf(stderr, "bad read at line %d, read %zu bytes\n", __LINE__, ok);
@@ -617,7 +620,7 @@ void read_file(const char *filename, const char *save_as) {
 
     /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
     Chunk *chunk = chunk_new(p);
-    for (int i = 0; i < meta.full_chunk_num; ++i) {
+    for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
         read_cooked_chunk(chunk, in);
         write_raw_chunk(chunk, out);
     }
@@ -650,7 +653,7 @@ void write_file(const char *file_to_read, int p) {
 
     /* 读取文件，计算校验和并且存盘 */
     Chunk *chunk = chunk_new(p);
-    for (int i = 0; i < meta.full_chunk_num; ++i) {
+    for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
         read_raw_chunk(chunk, in);
         cook_chunk(chunk);
         write_cooked_chunk(chunk, out);
@@ -697,7 +700,7 @@ void repair_file(const char *fname, int bad_disks[2]) {
 
     /* 从 raid 中读取文件，计算校验和并且将数据写入到待重建的磁盘上 */
     Chunk *chunk = chunk_new(meta.p);
-    for (int i = 0; i < meta.full_chunk_num; ++i) {
+    for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
         read_cooked_chunk(chunk, in);
         write_cooked_chunk_to_bad_disk(chunk, bad_disks, out);
     }
