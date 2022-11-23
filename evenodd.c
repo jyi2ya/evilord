@@ -221,9 +221,10 @@ Error check_chunk(Chunk *chunk) {
  */
 Error cook_chunk_r1(Chunk *chunk) {
     int m = chunk->p;
-    for (int l = 0; l <= m - 2; ++l) {
+    for (int l = 0; l <= m - 2; ++l)
         PZERO(AT(l, m));
-        for (int t = 0; t <= m - 1; ++t) {
+    for (int t = 0; t <= m - 1; ++t) {
+        for (int l = 0; l <= m - 2; ++l) {
             PXOR(AT(l, m), AT(l, t));
         }
     }
@@ -239,9 +240,10 @@ Error cook_chunk_r2(Chunk *chunk) {
     int m = chunk->p;
     for (int t = 1; t <= m - 1; ++t)
         PXOR(S, ATR(m - 1 - t, t));
-    for (int l = 0; l <= m - 2; ++l) {
+    for (int l = 0; l <= m - 2; ++l)
         PASGN(AT(l, m + 1), S);
-        for (int t = 0; t <= m - 1; ++t) {
+    for (int t = 0; t <= m - 1; ++t) {
+        for (int l = 0; l <= m - 2; ++l) {
             PXOR(AT(l, m + 1), ATR(M(l - t), t));
         }
     }
@@ -251,7 +253,7 @@ Error cook_chunk_r2(Chunk *chunk) {
 /**
  * cook_chunk() - 计算校验值。
  */
-Error cook_chunk(Chunk *chunk) {
+inline Error cook_chunk(Chunk *chunk) {
     cook_chunk_r1(chunk);
     cook_chunk_r2(chunk);
 #ifndef NDEBUG
@@ -395,7 +397,7 @@ typedef Error (*Writer)(Chunk *, FILE **, int *);
 
 typedef struct {
     Writer writer;
-    volatile SpscQueue *queue;
+    SpscQueue *queue;
     FILE **files;
     int *option;
     int times;
@@ -405,7 +407,7 @@ typedef Error (*Reader)(Chunk *, FILE **);
 
 typedef struct {
     Reader reader;
-    volatile SpscQueue *queue;
+    SpscQueue *queue;
     FILE **files;
     int times;
     int p;
@@ -669,8 +671,8 @@ void read_file(const char *filename, const char *save_as) {
         }
     }
 
-    volatile SpscQueue qin = SpscQueue_new(2244);
-    volatile SpscQueue qout = SpscQueue_new(2244);
+    SpscQueue qin = SpscQueue_new(2244);
+    SpscQueue qout = SpscQueue_new(2244);
     IOCtx ioctx = {
         .writectx = {
             .files = out,
@@ -691,13 +693,18 @@ void read_file(const char *filename, const char *save_as) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
+    int rwnum = meta.full_chunk_num;
+    int cpu_block_cnt = 0;
     /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
     for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
+        if (SpscQueue_full(&qin))
+            cpu_block_cnt += 1;
         Chunk *chunk = SpscQueue_pop(&qin);
         try_repair_chunk(chunk, bad_disks);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
+    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / rwnum);
 
     if (meta.last_chunk_data_size != 0) {
         Chunk *chunk = chunk_new(p);
@@ -735,8 +742,8 @@ void write_file(const char *file_to_read, int p) {
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
-    volatile SpscQueue qin = SpscQueue_new(2244);
-    volatile SpscQueue qout = SpscQueue_new(2244);
+    SpscQueue qin = SpscQueue_new(2244);
+    SpscQueue qout = SpscQueue_new(2244);
     IOCtx ioctx = {
         .writectx = {
             .files = out,
@@ -757,12 +764,16 @@ void write_file(const char *file_to_read, int p) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
+    int cpu_block_cnt = 0;
     for (int i = 0; i < rwnum; ++i) {
+        if (SpscQueue_full(&qin))
+            cpu_block_cnt += 1;
         Chunk *chunk = SpscQueue_pop(&qin);
         cook_chunk(chunk);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
+    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / rwnum);
 
     SpscQueue_drop(&qin);
     SpscQueue_drop(&qout);
@@ -805,8 +816,8 @@ void repair_file(const char *fname, int bad_disks[2]) {
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
-    volatile SpscQueue qin = SpscQueue_new(2244);
-    volatile SpscQueue qout = SpscQueue_new(2244);
+    SpscQueue qin = SpscQueue_new(2244);
+    SpscQueue qout = SpscQueue_new(2244);
     IOCtx ioctx = {
         .writectx = {
             .files = out,
@@ -827,12 +838,16 @@ void repair_file(const char *fname, int bad_disks[2]) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
+    int cpu_block_cnt = 0;
     for (int i = 0; i < rwnum; ++i) {
+        if (SpscQueue_full(&qin))
+            cpu_block_cnt += 1;
         Chunk *chunk = SpscQueue_pop(&qin);
         try_repair_chunk(chunk, bad_disks);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
+    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / rwnum);
 
     SpscQueue_drop(&qin);
     SpscQueue_drop(&qout);
@@ -858,10 +873,19 @@ int main(int argc, char** argv) {
 
     char* op = argv[1];
     if (strcmp(op, "write") == 0) {
+#ifndef NDEBUG
+        fprintf(stderr, "write %s %s\n", argv[2], argv[3]);
+#endif
         write_file(argv[2], atoi(argv[3]));
     } else if (strcmp(op, "read") == 0) {
+#ifndef NDEBUG
+        fprintf(stderr, "read %s %s\n", argv[2], argv[3]);
+#endif
         read_file(argv[2], argv[3]);
     } else if (strcmp(op, "repair") == 0) {
+#ifndef NDEBUG
+        fprintf(stderr, "repair %s %s\n", argv[2], "DAxZE");
+#endif
         int bad_disk_num = atoi(argv[2]);
         int bad_disks[2] = { -1, -1 };
         for (int i = 0; i < bad_disk_num; ++i) {

@@ -14,12 +14,12 @@ typedef struct {
 
 SpscQueue SpscQueue_new(unsigned int size);
 
-void SpscQueue_drop(volatile SpscQueue *self);
+void SpscQueue_drop(SpscQueue *self);
 
-int SpscQueue_empty(volatile SpscQueue *self);
+int SpscQueue_empty(SpscQueue *self);
 
-void SpscQueue_push(volatile SpscQueue *self, ItemType data);
+void SpscQueue_push(SpscQueue *self, ItemType data);
 
-int SpscQueue_full(volatile SpscQueue *self);
+int SpscQueue_full(SpscQueue *self);
 
-ItemType SpscQueue_pop(volatile SpscQueue *self);
+ItemType SpscQueue_pop(SpscQueue *self);
