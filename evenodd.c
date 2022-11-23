@@ -12,6 +12,15 @@
 
 #include "spsc/spsc.h"
 
+char *simple_hash(char *str) {
+    for (int i = 0; str[i] != '\0'; ++i) {
+        if (str[i] == '/') {
+            str[i] = i + 'A';
+        }
+    }
+    return str;
+}
+
 void panic(void) {
     abort();
 }
@@ -627,6 +636,7 @@ Metadata get_raw_file_metadata(const char *filename, int p) {
  */
 Metadata get_cooked_file_metadata(const char *filename) {
     Metadata result;
+    int success = 0;
 
     /* 尝试磁盘 0 1 和 2 ，从第一个成功打开的磁盘中读取文件的 Metadata */
     for (int i = 0; i < 3; ++i) {
@@ -636,8 +646,13 @@ Metadata get_cooked_file_metadata(const char *filename) {
         if (fp != NULL) {
             fread(&result, sizeof(result), 1, fp);
             fclose(fp);
+            success = 1;
             break;
         }
+    }
+    if (!success) {
+        puts("File does not exist！");
+        exit(0);
     }
     return result;
 }
@@ -645,7 +660,7 @@ Metadata get_cooked_file_metadata(const char *filename) {
 /**
  * read_file() - 题目规定的 read 操作实现
  */
-void read_file(const char *filename, const char *save_as) {
+void read_file(char *filename, const char *save_as) {
     FILE *out[1] = {
         fopen(save_as, "wb")
     };
@@ -657,6 +672,8 @@ void read_file(const char *filename, const char *save_as) {
     Metadata meta = get_cooked_file_metadata(filename);
     int p = meta.p;
 
+    simple_hash(filename);
+
     /* 打开文件所保存的 p+2 个磁盘 */
     for (int i = 0; i < p + 2; ++i) {
         char path[PATH_MAX];
@@ -667,6 +684,10 @@ void read_file(const char *filename, const char *save_as) {
         if (in[i] != NULL) {
             skip_metadata(in[i]);
         } else {
+            if (bad_disk_num == 2) {
+                puts("File corrupted!");
+                exit(0);
+            }
             bad_disks[bad_disk_num++] = i;
         }
     }
@@ -694,17 +715,23 @@ void read_file(const char *filename, const char *save_as) {
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
     int rwnum = meta.full_chunk_num;
+#ifdef PERFCNT
     int cpu_block_cnt = 0;
+#endif
     /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
-    for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
+    for (int i = 0; i < rwnum; ++i) {
+#ifdef PERFCNT
         if (SpscQueue_full(&qin))
             cpu_block_cnt += 1;
+#endif
         Chunk *chunk = SpscQueue_pop(&qin);
         try_repair_chunk(chunk, bad_disks);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
-    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / rwnum);
+#ifdef PERFCNT
+    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+#endif
 
     if (meta.last_chunk_data_size != 0) {
         Chunk *chunk = chunk_new(p);
@@ -721,12 +748,14 @@ void read_file(const char *filename, const char *save_as) {
 /**
  * write_file() - 题目规定的 write 操作实现
  */
-void write_file(const char *file_to_read, int p) {
+void write_file(char *file_to_read, int p) {
     FILE *in[1] = { fopen(file_to_read, "rb") };
     FILE *out[PMAX + 2]; // FIXME: dirty hack
 
     /* 获取文件的 Metadata */
     Metadata meta = get_raw_file_metadata(file_to_read, p);
+
+    simple_hash(file_to_read);
 
     /* 准备保存文件所需要的 p+2 个磁盘 */
     for (int i = 0; i < p + 2; ++i) {
@@ -764,16 +793,22 @@ void write_file(const char *file_to_read, int p) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
+#ifdef PERFCNT
     int cpu_block_cnt = 0;
+#endif
     for (int i = 0; i < rwnum; ++i) {
+#ifdef PERFCNT
         if (SpscQueue_full(&qin))
             cpu_block_cnt += 1;
+#endif
         Chunk *chunk = SpscQueue_pop(&qin);
         cook_chunk(chunk);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
-    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / rwnum);
+#ifdef PERFCNT
+    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+#endif
 
     SpscQueue_drop(&qin);
     SpscQueue_drop(&qout);
@@ -838,16 +873,22 @@ void repair_file(const char *fname, int bad_disks[2]) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
+#ifdef PERFCNT
     int cpu_block_cnt = 0;
+#endif
     for (int i = 0; i < rwnum; ++i) {
+#ifdef PERFCNT
         if (SpscQueue_full(&qin))
             cpu_block_cnt += 1;
+#endif
         Chunk *chunk = SpscQueue_pop(&qin);
         try_repair_chunk(chunk, bad_disks);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
-    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / rwnum);
+#ifdef PERFCNT
+    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+#endif
 
     SpscQueue_drop(&qin);
     SpscQueue_drop(&qout);
@@ -888,6 +929,12 @@ int main(int argc, char** argv) {
 #endif
         int bad_disk_num = atoi(argv[2]);
         int bad_disks[2] = { -1, -1 };
+
+        if (bad_disk_num > 2) {
+            puts("Too many corruptions!");
+            exit(0);
+        }
+
         for (int i = 0; i < bad_disk_num; ++i) {
             bad_disks[i] = atoi(argv[i + 3]);
         }
