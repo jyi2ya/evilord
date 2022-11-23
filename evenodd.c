@@ -418,17 +418,16 @@ typedef struct {
 
 void io_loop(ReadCtx readctx, WriteCtx writectx) {
     while (readctx.times > 0) {
-        while (readctx.times > 0 && !SpscQueue_full(readctx.queue) && !SpscQueue_full(writectx.queue)) {
-            Chunk *chunk = chunk_new(readctx.p);
-            readctx.reader(chunk, readctx.files);
-            SpscQueue_push(readctx.queue, chunk);
-            readctx.times -= 1;
-        }
-        while (writectx.times > 0 && !SpscQueue_empty(writectx.queue) && !SpscQueue_empty(readctx.queue)) {
+        if (SpscQueue_full(writectx.queue) || SpscQueue_full(readctx.queue)) {
             Chunk *chunk = SpscQueue_pop(writectx.queue);
             writectx.writer(chunk, writectx.files, writectx.option);
             free(chunk);
             writectx.times -= 1;
+        } else {
+            Chunk *chunk = chunk_new(readctx.p);
+            readctx.reader(chunk, readctx.files);
+            SpscQueue_push(readctx.queue, chunk);
+            readctx.times -= 1;
         }
     }
 
@@ -544,16 +543,9 @@ Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
-    int bad_disks[2] = { -1, -1 };
-    int bad_disk_num = 0;
 
     for (int i = 0; i < disk_num; ++i) {
         if (files[i] == NULL) {
-            bad_disk_num += 1;
-            if (bad_disk_num > 2) {
-                return ETooManyCorruptions;
-            }
-            bad_disks[bad_disk_num - 1] = i;
             memset(data, 0, items_per_disk * sizeof(Packet));
         } else {
 #ifndef NDEBUG
@@ -569,14 +561,6 @@ Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
         }
         data += items_per_disk;
     }
-
-    if (bad_disk_num != 0) {
-        return try_repair_chunk(chunk, bad_disks);
-    }
-
-#ifndef NDEBUG
-    check_chunk(chunk);
-#endif
 
     return Success;
 }
@@ -664,6 +648,8 @@ void read_file(const char *filename, const char *save_as) {
         fopen(save_as, "wb")
     };
     FILE *in[PMAX + 2]; // FIXME: dirty hack
+    int bad_disks[2] = { -1, -1 };
+    int bad_disk_num = 0;
 
     /* 从 raid 中获取文件的 Metadata */
     Metadata meta = get_cooked_file_metadata(filename);
@@ -676,13 +662,15 @@ void read_file(const char *filename, const char *save_as) {
         in[i] = fopen(path, "rb");
 
         /* 跳过磁盘开头的 Metadata */
-        if (in[i] != NULL)
+        if (in[i] != NULL) {
             skip_metadata(in[i]);
+        } else {
+            bad_disks[bad_disk_num++] = i;
+        }
     }
 
     volatile SpscQueue qin = SpscQueue_new(2244);
     volatile SpscQueue qout = SpscQueue_new(2244);
-    fprintf(stderr, "%u\n", qin.mask);
     IOCtx ioctx = {
         .writectx = {
             .files = out,
@@ -706,6 +694,7 @@ void read_file(const char *filename, const char *save_as) {
     /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
     for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
         Chunk *chunk = SpscQueue_pop(&qin);
+        try_repair_chunk(chunk, bad_disks);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
@@ -713,6 +702,7 @@ void read_file(const char *filename, const char *save_as) {
     if (meta.last_chunk_data_size != 0) {
         Chunk *chunk = chunk_new(p);
         read_cooked_chunk(chunk, in);
+        try_repair_chunk(chunk, bad_disks);
         write_raw_chunk_limited(chunk, out, meta.last_chunk_data_size);
         free(chunk);
     }
@@ -741,19 +731,41 @@ void write_file(const char *file_to_read, int p) {
         write_metadata(meta, out[i]);
     }
 
-    /* 读取文件，计算校验和并且存盘 */
-    Chunk *chunk = chunk_new(p);
-    for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
-        read_raw_chunk(chunk, in);
+    int rwnum = meta.full_chunk_num;
+    if (meta.last_chunk_data_size != 0)
+        rwnum += 1;
+
+    volatile SpscQueue qin = SpscQueue_new(2244);
+    volatile SpscQueue qout = SpscQueue_new(2244);
+    IOCtx ioctx = {
+        .writectx = {
+            .files = out,
+            .option = NULL,
+            .queue = &qout,
+            .writer = write_cooked_chunk,
+            .times = rwnum,
+        },
+        .readctx = {
+            .files = in,
+            .queue = &qin,
+            .p = p,
+            .reader = read_raw_chunk,
+            .times = rwnum,
+        },
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, io_thread, &ioctx);
+
+    for (int i = 0; i < rwnum; ++i) {
+        Chunk *chunk = SpscQueue_pop(&qin);
         cook_chunk(chunk);
-        write_cooked_chunk(chunk, out, NULL);
+        SpscQueue_push(&qout, chunk);
     }
-    if (meta.last_chunk_data_size != 0) {
-        read_raw_chunk(chunk, in);
-        cook_chunk(chunk);
-        write_cooked_chunk(chunk, out, NULL);
-    }
-    free(chunk);
+    pthread_join(tid, NULL);
+
+    SpscQueue_drop(&qin);
+    SpscQueue_drop(&qout);
 }
 
 /**
@@ -767,6 +779,7 @@ void repair_file(const char *fname, int bad_disks[2]) {
     /* 从 raid 中读取文件的 Metadata */
     Metadata meta = get_cooked_file_metadata(fname);
 
+    int p = meta.p;
     /* 打开文件所保存的 p+2 个磁盘 */
     for (int i = 0; i < meta.p + 2; ++i) {
         sprintf(path, "disk_%d", i);
@@ -788,17 +801,41 @@ void repair_file(const char *fname, int bad_disks[2]) {
         }
     }
 
-    /* 从 raid 中读取文件，计算校验和并且将数据写入到待重建的磁盘上 */
-    Chunk *chunk = chunk_new(meta.p);
-    for (int i = 0; (size_t)i < meta.full_chunk_num; ++i) {
-        read_cooked_chunk(chunk, in);
-        write_cooked_chunk_to_bad_disk(chunk, out, bad_disks);
+    int rwnum = meta.full_chunk_num;
+    if (meta.last_chunk_data_size != 0)
+        rwnum += 1;
+
+    volatile SpscQueue qin = SpscQueue_new(2244);
+    volatile SpscQueue qout = SpscQueue_new(2244);
+    IOCtx ioctx = {
+        .writectx = {
+            .files = out,
+            .option = bad_disks,
+            .queue = &qout,
+            .writer = write_cooked_chunk_to_bad_disk,
+            .times = rwnum,
+        },
+        .readctx = {
+            .files = in,
+            .queue = &qin,
+            .p = p,
+            .reader = read_cooked_chunk,
+            .times = rwnum,
+        },
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, io_thread, &ioctx);
+
+    for (int i = 0; i < rwnum; ++i) {
+        Chunk *chunk = SpscQueue_pop(&qin);
+        try_repair_chunk(chunk, bad_disks);
+        SpscQueue_push(&qout, chunk);
     }
-    if (meta.last_chunk_data_size != 0) {
-        read_cooked_chunk(chunk, in);
-        write_cooked_chunk_to_bad_disk(chunk, out, bad_disks);
-    }
-    free(chunk);
+    pthread_join(tid, NULL);
+
+    SpscQueue_drop(&qin);
+    SpscQueue_drop(&qout);
 }
 
 /**
