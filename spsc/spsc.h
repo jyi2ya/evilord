@@ -1,7 +1,17 @@
 #include <stdlib.h>
 
+#if defined(__GNUC__) && __GNUC__ >= 4 && __GNUC_MINOR__ > 7
+#define read_barrier() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#define write_barrier() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#else // Non-GCC or old GCC.
+#if defined(__x86_64__) || defined(_M_X64_) || defined(_M_I86) || defined(__i386__)
 #define read_barrier()  __asm__ volatile("":::"memory")
 #define write_barrier() __asm__ volatile("":::"memory")
+#elif defined(__arm__) || defined(__aarch64__)
+#define read_barrier() __asm__ volatile("dmb sy")
+#define write_barrier() __asm__ volatile("dmb sy")
+#endif
+#endif
 
 typedef void *ItemType;
 
