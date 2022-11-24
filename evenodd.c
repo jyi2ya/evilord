@@ -78,7 +78,7 @@ typedef uint64_t Packet;
 /**
  * PMAX - evenodd 算法所使用的质数的最大值
  */
-#define PMAX (101)
+#define PMAX (201)
 
 /**
  * Chunk - 实现校验与恢复功能的基本单位。
