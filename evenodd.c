@@ -16,6 +16,14 @@
 #define BIGBUFSIZE 8388608
 #endif
 
+#if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 7))
+#define UNUSED_PARAM __attribute__((unused))
+#define UNUSED_PARAM_RESULT __attribute__((warn_unused_result))
+#else // Non-GCC or old GCC.
+#define UNUSED_PARAM
+#define UNUSED_PARAM_RESULT
+#endif
+
 char *simple_hash(char *str) {
     for (int i = 0; str[i] != '\0'; ++i) {
         if (str[i] == '/') {
@@ -278,11 +286,11 @@ inline Error cook_chunk(Chunk *chunk) {
     return Success;
 }
 
-Error repair_0bad(Chunk *chunk, int i, int j) {
+Error repair_0bad(UNUSED_PARAM Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
     return Success;
 }
 
-Error repair_1bad(Chunk *chunk, int bad_disk, int _) {
+Error repair_1bad(Chunk *chunk, int bad_disk, UNUSED_PARAM int _) {
     /* 仅一个磁盘损坏 */
     if (bad_disk <= chunk->p) {
         /* 坏掉的磁盘是前 p+1 个，可以通过简单异或恢复 */
@@ -304,12 +312,12 @@ Error repair_1bad(Chunk *chunk, int bad_disk, int _) {
     return Success;
 }
 
-Error repair_2bad_case1(Chunk *chunk, int i, int j) {
+Error repair_2bad_case1(Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
     /* i == m && j == m + 1 */
     return cook_chunk(chunk);
 }
 
-Error repair_2bad_case2(Chunk *chunk, int i, int j) {
+Error repair_2bad_case2(Chunk *chunk, int i, UNUSED_PARAM int j) {
     /* i < m && j == m */
     int m = chunk->p;
     Packet S;
@@ -348,7 +356,7 @@ Error repair_2bad_case2(Chunk *chunk, int i, int j) {
     return Success;
 }
 
-Error repair_2bad_case3(Chunk *chunk, int i, int j) {
+Error repair_2bad_case3(Chunk *chunk, int i, UNUSED_PARAM int j) {
     /* i < m && j == m + 1 */
     int m = chunk->p;
     for (int k = 0; k < m - 1; ++k)
@@ -489,7 +497,7 @@ Error write_raw_chunk_limited(Chunk *chunk, FILE *file[1], int limit) {
 /**
  * write_raw_chunk() - 将 raw chunk 写入文件
  */
-Error write_raw_chunk(Chunk *chunk, FILE *file[1], int _unused[1]) {
+Error write_raw_chunk(Chunk *chunk, FILE *file[1], UNUSED_PARAM int _unused[1]) {
     size_t num = chunk->p * (chunk->p - 1);
     fwrite(chunk->data, sizeof(Packet), num, file[0]);
     return Success;
@@ -518,7 +526,7 @@ Error read_raw_chunk(Chunk *chunk, FILE **file) {
  *
  * 调用者应保证 chunk 合法，以及 files[] 数组及其内文件指针有效。
  */
-Error write_cooked_chunk(Chunk *chunk, FILE *files[], int _unused[1]) {
+Error write_cooked_chunk(Chunk *chunk, FILE *files[], UNUSED_PARAM int _unused[1]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
