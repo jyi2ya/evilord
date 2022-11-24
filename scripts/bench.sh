@@ -15,32 +15,41 @@ dd if=/dev/urandom of=test.bin bs="$filesize" count=1 iflag=fullblock
 
 timeit() {
 	begin=$(date +%s)
-	eval "$@"
+    eval "$@"
 	end=$(date +%s)
-	speed=$((filesize / (end - begin) / 1024 * 100 / 1024 ))
+	speed=$((filesize / (end - begin + 1) * 100 / 1024 / 1024 ))
 	echo -n "$speed" | sed 's/\(..\)$/.\1/'
-	echo " MB/s"
+	echo -n " MB/s "
 }
 
 do_test() {
     p="$1"
     rm -rf disk_*
     echo write p=$p filesize=$filesize
-    timeit time ../evenodd write test.bin "$p"
+    timeit ../evenodd write test.bin "$p"
+    echo "$((speed * 100 / cp_speed))% cp speed"
+
     echo read p=$p filesize=$filesize
-    timeit time ../evenodd read test.bin test.bin.rtv
+    timeit ../evenodd read test.bin test.bin.rtv
     rm -rf disk_2
+    echo "$((speed * 100 / cp_speed))% cp speed"
+
     echo repair1 p=$p filesize=$filesize
-    timeit time ../evenodd repair 1 2
+    timeit ../evenodd repair 1 2
     rm -rf disk_2 disk_3
+    echo "$((speed * 100 / cp_speed))% cp speed"
+
     echo repair2 p=$p filesize=$filesize
-    timeit time ../evenodd repair 2 2 3
+    timeit ../evenodd repair 2 2 3
+    echo "$((speed * 100 / cp_speed))% cp speed"
 }
 
 rm -rf disk_*
 echo copy
 mkdir -p disk_0
-timeit time dd if=test.bin of=disk_0/test.bin iflag=fullblock
+timeit dd if=test.bin of=disk_0/test.bin iflag=fullblock
+cp_speed="$speed"
+echo "$((speed * 100 / cp_speed))% cp speed"
 
 do_test 3
 do_test 101
