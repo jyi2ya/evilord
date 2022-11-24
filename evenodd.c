@@ -12,6 +12,10 @@
 
 #include "spsc/spsc.h"
 
+#ifdef BIGBUF
+#define BIGBUFSIZE 8388608
+#endif
+
 char *simple_hash(char *str) {
     for (int i = 0; str[i] != '\0'; ++i) {
         if (str[i] == '/') {
@@ -676,6 +680,10 @@ void read_file(char *filename, const char *save_as) {
     FILE *out[1] = {
         fopen(save_as, "wb")
     };
+#ifdef BIGBUF
+    setvbuf(out[0], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
+#endif
+
     FILE *in[PMAX + 2]; // FIXME: dirty hack
     int bad_disks[2] = { -1, -1 };
     int bad_disk_num = 0;
@@ -694,6 +702,9 @@ void read_file(char *filename, const char *save_as) {
 
         /* 跳过磁盘开头的 Metadata */
         if (in[i] != NULL) {
+#ifdef BIGBUF
+            setvbuf(in[i], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
+#endif
             skip_metadata(in[i]);
         } else {
             if (bad_disk_num == 2) {
@@ -784,7 +795,12 @@ void read_file(char *filename, const char *save_as) {
  * write_file() - 题目规定的 write 操作实现
  */
 void write_file(char *file_to_read, int p) {
-    FILE *in[1] = { fopen(file_to_read, "rb") };
+    FILE *in[1] = {
+        fopen(file_to_read, "rb")
+    };
+#ifdef BIGBUF
+    setvbuf(in[0], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
+#endif
     FILE *out[PMAX + 2]; // FIXME: dirty hack
 
     /* 获取文件的 Metadata */
@@ -799,6 +815,9 @@ void write_file(char *file_to_read, int p) {
         mkdir(path, 0755);
         sprintf(path, "disk_%d/%s", i, file_to_read);
         out[i] = fopen(path, "wb");
+#ifdef BIGBUF
+        setvbuf(out[i], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
+#endif
         write_metadata(meta, out[i]);
     }
 
@@ -869,14 +888,22 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
         in[i] = fopen(path, "rb");
 
         /* 跳过磁盘开头的 Metadata */
-        if (in[i] != NULL)
+        if (in[i] != NULL) {
+#ifdef BIGBUF
+            setvbuf(in[i], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
+#endif
             skip_metadata(in[i]);
+
+        }
     }
 
     /* 重建损坏的两个磁盘，并且打开准备写入 */
     for (int i = 0; i < bad_disk_num; ++i) {
         sprintf(path, "disk_%d/%s", bad_disks[i], fname);
         out[i] = fopen(path, "wb");
+#ifdef BIGBUF
+        setvbuf(out[i], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
+#endif
         write_metadata(meta, out[i]);
     }
 
