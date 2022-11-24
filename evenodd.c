@@ -174,7 +174,7 @@ Chunk *chunk_new(int p) {
 /**
  * M() - 对 m 取模
  */
-#define M(x) (((x) % m + m) % m)
+#define M(x) (((x) + m) % m)
 
 Error check_chunk(Chunk *chunk) {
     int m = chunk->p;
@@ -248,12 +248,15 @@ Error cook_chunk_r2(Chunk *chunk) {
     PZERO(S);
     int m = chunk->p;
     for (int t = 1; t <= m - 1; ++t)
-        PXOR(S, ATR(m - 1 - t, t));
+        PXOR(S, AT(m - 1 - t, t));
     for (int l = 0; l <= m - 2; ++l)
         PASGN(AT(l, m + 1), S);
     for (int t = 0; t <= m - 1; ++t) {
-        for (int l = 0; l <= m - 2; ++l) {
-            PXOR(AT(l, m + 1), ATR(M(l - t), t));
+        for (int l = 0; l < t; ++l) {
+            PXOR(AT(l, m + 1), ATR(m + l - t, t));
+        }
+        for (int l = t; l <= m - 2; ++l) {
+            PXOR(AT(l, m + 1), ATR(l - t, t));
         }
     }
     return Success;
@@ -271,134 +274,143 @@ inline Error cook_chunk(Chunk *chunk) {
     return Success;
 }
 
-/**
- * try_repair_chunk() - 尝试修复 chunk
- *
- * @chunk - 待修复的 chunk
- * @bad_disks[2] - 损坏的磁盘编号，-1 代表无磁盘损坏
- *                 如果所有磁盘均损坏，则两个元素皆为 -1
- *                 如果仅有一个磁盘损坏，则第一个元素为非负整数，第二个元素为 -1
- *                 如果有两个磁盘损坏，则两个元素均为非负整数
- *
- * 完全依照论文实验。文档参考论文。
- */
-Error try_repair_chunk(Chunk *chunk, int bad_disks[2]) {
-    /* 两个磁盘都是好的 */
-    if (bad_disks[0] == -1) {
-        return Success;
-    }
+Error repair_0bad(Chunk *chunk, int i, int j) {
+    return Success;
+}
 
+Error repair_1bad(Chunk *chunk, int bad_disk, int _) {
     /* 仅一个磁盘损坏 */
-    if (bad_disks[1] == -1 || bad_disks[0] == bad_disks[1]) {
-        if (bad_disks[0] <= chunk->p) {
-            /* 坏掉的磁盘是前 p+1 个，可以通过简单异或恢复 */
-            for (int i = 0; i < chunk->p - 1; ++i)
-                PZERO(AT(i, bad_disks[0]));
-            for (int j = 0; j <= chunk->p; ++j) {
-                if (j == bad_disks[0]) {
-                    continue;
-                }
-                for (int i = 0; i < chunk->p - 1; ++i) {
-                    PXOR(AT(i, bad_disks[0]), AT(i, j));
-                }
-            }
-        } else {
-            /* 坏掉的磁盘是魔法对角线的校验值 */
-            /* 重新计算魔法对角线的校验值 */
-            cook_chunk_r2(chunk);
-        }
-        return Success;
-    }
-
-#define min(x, y) ((x) < (y) ? (x) : (y))
-#define max(x, y) ((x) > (y) ? (x) : (y))
-    int i = min(bad_disks[0], bad_disks[1]);
-    int j = max(bad_disks[0], bad_disks[1]);
-    int m = chunk->p;
-    if (i == m && j == m + 1) {
-        /* 损坏的是两个保存校验值的磁盘 */
-        cook_chunk(chunk);
-    } else if (i < m && j == m) {
-        /* 损坏的是一块原始数据磁盘，和保存每行异或校验值的磁盘 */
-        Packet S;
-        PASGN(S, ATR(M(i - 1), m + 1));
-        for (int l = 0; l <= m - 1; ++l) {
-            PXOR(S, ATR(M(i - 1 - l), l));
-        }
-
-        // recover column i
-        for (int k = 0; k <= m - 2; ++k) {
-            PASGN(AT(k, i), S);
-            PXOR(AT(k, i), ATR(M(i + k), m + 1));
-            for (int l = 0; l <= m - 1; ++l) {
-                if (l == i)
-                    continue;
-                PXOR(AT(k, i), ATR(M(k + i - l), l));
-            }
-        }
-        cook_chunk_r1(chunk);
-    } else if (i < m && j == m + 1) {
-        /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
-        for (int k = 0; k < m - 1; ++k)
-            PZERO(AT(k, i));
-        for (int l = 0; l <= m; ++l) {
-            if (l == i) {
+    if (bad_disk <= chunk->p) {
+        /* 坏掉的磁盘是前 p+1 个，可以通过简单异或恢复 */
+        for (int i = 0; i < chunk->p - 1; ++i)
+            PZERO(AT(i, bad_disk));
+        for (int j = 0; j <= chunk->p; ++j) {
+            if (j == bad_disk) {
                 continue;
             }
-            for (int k = 0; k < m - 1; ++k) {
-                PXOR(AT(k, i), AT(k, l));
+            for (int i = 0; i < chunk->p - 1; ++i) {
+                PXOR(AT(i, bad_disk), AT(i, j));
             }
         }
+    } else {
+        /* 坏掉的磁盘是魔法对角线的校验值 */
+        /* 重新计算魔法对角线的校验值 */
         cook_chunk_r2(chunk);
-    } else { // i < m and j < m
-        /* 损坏的是两块原始数据磁盘 */
-        Packet S;
-        PZERO(S);
-        for (int l = 0; l <= m - 2; ++l) {
-            PXOR(S, ATR(l, m));
-            PXOR(S, ATR(l, m + 1));
+    }
+    return Success;
+}
+
+Error repair_2bad_case1(Chunk *chunk, int i, int j) {
+    /* i == m && j == m + 1 */
+    return cook_chunk(chunk);
+}
+
+Error repair_2bad_case2(Chunk *chunk, int i, int j) {
+    /* i < m && j == m */
+    int m = chunk->p;
+    Packet S;
+    int ref_diagonal = M(i - 1);
+    PASGN(S, ATR(ref_diagonal, m + 1));
+    for (int l = 0; l <= ref_diagonal; ++l) {
+        PXOR(S, ATR(ref_diagonal - l, l));
+    }
+    for (int l = ref_diagonal + 1; l < m - 1; ++l) {
+        PXOR(S, ATR(m + ref_diagonal - l, l));
+    }
+    if (ref_diagonal < m - 2)
+        PXOR(S, ATR(ref_diagonal + 1, m - 1));
+
+    // recover column i
+    for (int k = 0; k < m - i && k <= m - 2; ++k) {
+        PASGN(AT(k, i), S);
+        PXOR(AT(k, i), ATR(i + k, m + 1));
+
+        /* l < i <= k + i < m */
+        for (int l = 0; l < i; ++l)
+            PXOR(AT(k, i), ATR(k + i - l, l));
+        /* i <= k + i < m */
+        for (int l = i + 1; l <= m - 1; ++l)
+            PXOR(AT(k, i), ATR(M(k + i - l), l));
+    }
+    for (int k = m - i; k <= m - 2; ++k) {
+        PASGN(AT(k, i), S);
+        PXOR(AT(k, i), ATR(i + k - m, m + 1));
+        for (int l = 0; l < i; ++l)
+            PXOR(AT(k, i), ATR(M(k + i - l), l));
+        for (int l = i + 1; l <= m - 1; ++l)
+            PXOR(AT(k, i), ATR(M(k + i - l), l));
+    }
+    cook_chunk_r1(chunk);
+    return Success;
+}
+
+Error repair_2bad_case3(Chunk *chunk, int i, int j) {
+    /* i < m && j == m + 1 */
+    int m = chunk->p;
+    for (int k = 0; k < m - 1; ++k)
+        PZERO(AT(k, i));
+    for (int l = 0; l < i; ++l) {
+        for (int k = 0; k < m - 1; ++k) {
+            PXOR(AT(k, i), AT(k, l));
         }
-        // horizontal syndromes S0
-        // diagonal syndromes S1
-        Packet *S0 = malloc(m * sizeof(Packet));
-        Packet *S1 = malloc(m * sizeof(Packet));
-
-        for (int u = 0; u <= m - 1; ++u) {
-            PZERO(S0[u]);
-            for (int l = 0; l <= m; ++l) {
-                if (l == i || l == j)
-                    continue;
-                PXOR(S0[u], ATR(u, l));
-            }
+    }
+    for (int l = i + 1; l <= m; ++l) {
+        for (int k = 0; k < m - 1; ++k) {
+            PXOR(AT(k, i), AT(k, l));
         }
+    }
+    cook_chunk_r2(chunk);
+    return Success;
+}
 
-        for (int u = 0; u < m; ++u) {
-            PASGN(S1[u], S);
-            PXOR(S1[u], ATR(u, m + 1));
-            for (int l = 0; l <= m - 1; ++l) {
-                if (l == i || l == j)
-                    continue;
-                PXOR(S1[u], ATR(M(u - l), l));
-            }
-        }
+Error repair_2bad_case4(Chunk *chunk, int i, int j) {
+    int m = chunk->p;
+    /* 损坏的是两块原始数据磁盘 */
+    Packet S;
+    PZERO(S);
+    for (int l = 0; l <= m - 2; ++l) {
+        PXOR(S, ATR(l, m));
+        PXOR(S, ATR(l, m + 1));
+    }
+    // horizontal syndromes S0
+    // diagonal syndromes S1
+    Packet S0[PMAX];
+    Packet S1[PMAX];
 
-        int s = M(-(j - i) - 1);
-        do {
-            AT(s, j) = S1[M(j + s)];
-            PXOR(AT(s, j), ATR(M(s + (j - i)), i));
-
-            AT(s, i) = S0[s];
-            PXOR(AT(s, i), AT(s, j));
-            s = M(s - (j - i));
-        } while (s != m - 1);
-        free(S0);
-        free(S1);
+    for (int u = 0; u <= m - 1; ++u) {
+        PZERO(S0[u]);
+        PASGN(S1[u], S);
+        PXOR(S1[u], ATR(u, m + 1));
     }
 
-#ifndef NDEBUG
-    check_chunk(chunk);
-#endif
+    for (int l = 0; l <= m; ++l) {
+        if (l == i || l == j)
+            continue;
+        for (int u = 0; u < m - 1; ++u)
+            PXOR(S0[u], AT(u, l));
+    }
 
+    if (i != 0 && j != 0) {
+        for (int u = 0; u < m - 1; ++u)
+            PXOR(S1[u], AT(u, 0));
+    }
+    for (int l = 1; l <= m - 1; ++l) {
+        if (l == i || l == j)
+            continue;
+        for (int u = 0; u < l - 1; ++u)
+            PXOR(S1[u], AT(m + u - l, l));
+        for (int u = l; u < m; ++u)
+            PXOR(S1[u], AT(u - l, l));
+    }
+
+    int step = j - i;
+    for (int s = m - 1 - step; s != m - 1; s -= step) {
+        AT(s, j) = S1[M(s + j)];
+        PXOR(AT(s, j), ATR(M(s + step), i));
+        AT(s, i) = S0[s];
+        PXOR(AT(s, i), AT(s, j));
+        s += m * (s < step);
+    }
     return Success;
 }
 
@@ -692,6 +704,29 @@ void read_file(char *filename, const char *save_as) {
         }
     }
 
+    Error (*repair)(Chunk *, int, int);
+
+    if (bad_disk_num == 0) {
+        repair = repair_0bad;
+    } else if (bad_disk_num == 1) {
+        repair = repair_1bad;
+    } else if (bad_disk_num == 2) {
+        int i = bad_disks[0], j = bad_disks[1];
+        if (i == p && j == p + 1) {
+            repair = repair_2bad_case1;
+            /* 损坏的是两个保存校验值的磁盘 */
+        } else if (i < p && j == p) {
+            repair = repair_2bad_case2;
+        } else if (i < p && j == p + 1) {
+            /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
+            repair = repair_2bad_case3;
+        } else { // i < p and j < p
+            repair = repair_2bad_case4;
+        }
+    } else {
+        repair = NULL;
+    }
+
     SpscQueue qin = SpscQueue_new(2244);
     SpscQueue qout = SpscQueue_new(2244);
     IOCtx ioctx = {
@@ -725,7 +760,7 @@ void read_file(char *filename, const char *save_as) {
             cpu_block_cnt += 1;
 #endif
         Chunk *chunk = SpscQueue_pop(&qin);
-        try_repair_chunk(chunk, bad_disks);
+        repair(chunk, bad_disks[0], bad_disks[1]);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
@@ -736,7 +771,7 @@ void read_file(char *filename, const char *save_as) {
     if (meta.last_chunk_data_size != 0) {
         Chunk *chunk = chunk_new(p);
         read_cooked_chunk(chunk, in);
-        try_repair_chunk(chunk, bad_disks);
+        repair(chunk, bad_disks[0], bad_disks[1]);
         write_raw_chunk_limited(chunk, out, meta.last_chunk_data_size);
         free(chunk);
     }
@@ -817,7 +852,7 @@ void write_file(char *file_to_read, int p) {
 /**
  * repair_file() - 题目规定的 repair 操作实现
  */
-void repair_file(const char *fname, int bad_disks[2]) {
+void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
     FILE *in[PMAX + 2]; // FIXME: dirty hack
     FILE *out[2] = { NULL, NULL };
     char path[PATH_MAX];
@@ -839,12 +874,33 @@ void repair_file(const char *fname, int bad_disks[2]) {
     }
 
     /* 重建损坏的两个磁盘，并且打开准备写入 */
-    for (int i = 0; i < 2; ++i) {
-        if (bad_disks[i] != -1) {
-            sprintf(path, "disk_%d/%s", bad_disks[i], fname);
-            out[i] = fopen(path, "wb");
-            write_metadata(meta, out[i]);
+    for (int i = 0; i < bad_disk_num; ++i) {
+        sprintf(path, "disk_%d/%s", bad_disks[i], fname);
+        out[i] = fopen(path, "wb");
+        write_metadata(meta, out[i]);
+    }
+
+    Error (*repair)(Chunk *, int, int);
+
+    if (bad_disk_num == 0) {
+        repair = repair_0bad;
+    } else if (bad_disk_num == 1) {
+        repair = repair_1bad;
+    } else if (bad_disk_num == 2) {
+        int i = bad_disks[0], j = bad_disks[1];
+        if (i == p && j == p + 1) {
+            repair = repair_2bad_case1;
+            /* 损坏的是两个保存校验值的磁盘 */
+        } else if (i < p && j == p) {
+            repair = repair_2bad_case2;
+        } else if (i < p && j == p + 1) {
+            /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
+            repair = repair_2bad_case3;
+        } else { // i < p and j < p
+            repair = repair_2bad_case4;
         }
+    } else {
+        repair = NULL;
     }
 
     int rwnum = meta.full_chunk_num;
@@ -882,7 +938,7 @@ void repair_file(const char *fname, int bad_disks[2]) {
             cpu_block_cnt += 1;
 #endif
         Chunk *chunk = SpscQueue_pop(&qin);
-        try_repair_chunk(chunk, bad_disks);
+        repair(chunk, bad_disks[0], bad_disks[1]);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
@@ -939,6 +995,17 @@ int main(int argc, char** argv) {
             bad_disks[i] = atoi(argv[i + 3]);
         }
 
+        if (bad_disk_num == 2) {
+            if (bad_disks[0] == bad_disks[1]) {
+                bad_disk_num = 1;
+                bad_disks[1] = -1;
+            } else if (bad_disks[0] > bad_disks[1]) {
+                int tmp = bad_disks[0];
+                bad_disks[0] = bad_disks[1];
+                bad_disks[1] = tmp;
+            }
+        }
+
         DIR *dir;
         for (int i = 0; i < 3; ++i) {
             char path[PATH_MAX];
@@ -953,7 +1020,7 @@ int main(int argc, char** argv) {
         while ((entry = readdir(dir)) != NULL) {
             const char *name = entry->d_name;
             if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0)
-                repair_file(entry->d_name, bad_disks);
+                repair_file(entry->d_name, bad_disk_num, bad_disks);
         }
         closedir(dir);
     } else {
