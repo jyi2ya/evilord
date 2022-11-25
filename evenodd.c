@@ -11,10 +11,7 @@
 #include <dirent.h>
 
 #include "spsc/spsc.h"
-
-#ifdef BIGBUF
-#define BIGBUFSIZE 8388608
-#endif
+#include "mmio/mmio.h"
 
 #if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 7))
 #define UNUSED_PARAM __attribute__((unused))
@@ -314,7 +311,9 @@ Error repair_1bad(Chunk *chunk, int bad_disk, UNUSED_PARAM int _) {
 
 Error repair_2bad_case1(Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
     /* i == m && j == m + 1 */
-    return cook_chunk(chunk);
+    cook_chunk_r1(chunk);
+    cook_chunk_r2(chunk);
+    return Success;
 }
 
 Error repair_2bad_case2(Chunk *chunk, int i, UNUSED_PARAM int j) {
@@ -426,22 +425,22 @@ Error repair_2bad_case4(Chunk *chunk, int i, int j) {
     return Success;
 }
 
-typedef Error (*Writer)(Chunk *, FILE **, int *);
+typedef Error (*Writer)(Chunk *, MMIO *, int *);
 
 typedef struct {
     Writer writer;
     SpscQueue *queue;
-    FILE **files;
+    MMIO *files;
     int *option;
     int times;
 } WriteCtx;
 
-typedef Error (*Reader)(Chunk *, FILE **);
+typedef Error (*Reader)(Chunk *, MMIO *);
 
 typedef struct {
     Reader reader;
     SpscQueue *queue;
-    FILE **files;
+    MMIO *files;
     int times;
     int p;
 } ReadCtx;
@@ -489,17 +488,17 @@ void *io_thread(void *data) {
  * 数据。此函数用于处理原始文件的最后一个 chunk，仅写入有效数据的部分。有效数
  * 据的大小由调用者根据其他信息计算。
  */
-Error write_raw_chunk_limited(Chunk *chunk, FILE *file[1], int limit) {
-    fwrite(chunk->data, 1, limit, file[0]);
+Error write_raw_chunk_limited(Chunk *chunk, MMIO file[1], int limit) {
+    mmwrite(chunk->data, limit, &file[0]);
     return Success;
 }
 
 /**
  * write_raw_chunk() - 将 raw chunk 写入文件
  */
-Error write_raw_chunk(Chunk *chunk, FILE *file[1], UNUSED_PARAM int _unused[1]) {
+Error write_raw_chunk(Chunk *chunk, MMIO file[1], UNUSED_PARAM int _unused[1]) {
     size_t num = chunk->p * (chunk->p - 1);
-    fwrite(chunk->data, sizeof(Packet), num, file[0]);
+    mmwrite(chunk->data, sizeof(Packet) * num, &file[0]);
     return Success;
 }
 
@@ -511,9 +510,9 @@ Error write_raw_chunk(Chunk *chunk, FILE *file[1], UNUSED_PARAM int _unused[1]) 
  * 原始文件大小经常不能被 p * (p-1) 整除，导致最后一个 chunk 通常不能读取到足
  * 够的数据。此处我们约定，未完全填满的 chunk 其余字节皆为 0。
  */
-Error read_raw_chunk(Chunk *chunk, FILE **file) {
+Error read_raw_chunk(Chunk *chunk, MMIO *file) {
     size_t num = chunk->p * (chunk->p - 1);
-    size_t ok = fread(chunk->data, 1, sizeof(Packet) * num, file[0]);
+    size_t ok = mmread(chunk->data, sizeof(Packet) * num, &file[0]);
     memset((void *)chunk->data + ok, 0, (chunk->p - 1) * (chunk->p + 2) * sizeof(Packet) - ok);
     return Success;
 }
@@ -526,7 +525,7 @@ Error read_raw_chunk(Chunk *chunk, FILE **file) {
  *
  * 调用者应保证 chunk 合法，以及 files[] 数组及其内文件指针有效。
  */
-Error write_cooked_chunk(Chunk *chunk, FILE *files[], UNUSED_PARAM int _unused[1]) {
+Error write_cooked_chunk(Chunk *chunk, MMIO *files, UNUSED_PARAM int _unused[1]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
@@ -534,7 +533,7 @@ Error write_cooked_chunk(Chunk *chunk, FILE *files[], UNUSED_PARAM int _unused[1
     check_chunk(chunk);
 #endif
     for (int i = 0; i < disk_num; ++i) {
-        fwrite(data, sizeof(Packet), items_per_disk, files[i]);
+        mmwrite(data, sizeof(Packet) * items_per_disk, &files[i]);
         data += items_per_disk;
     }
     return Success;
@@ -551,7 +550,7 @@ Error write_cooked_chunk(Chunk *chunk, FILE *files[], UNUSED_PARAM int _unused[1
  *
  * 用于将修复后的 chunk 写入坏掉的磁盘中。
  */
-Error write_cooked_chunk_to_bad_disk(Chunk *chunk, FILE *bad_disk_fp[2], int bad_disks[2]) {
+Error write_cooked_chunk_to_bad_disk(Chunk *chunk, MMIO bad_disk_fp[2], int bad_disks[2]) {
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
 #ifndef NDEBUG
@@ -559,7 +558,7 @@ Error write_cooked_chunk_to_bad_disk(Chunk *chunk, FILE *bad_disk_fp[2], int bad
 #endif
     for (int i = 0; i < 2; ++i) {
         if (bad_disks[i] != -1) {
-            fwrite(data + items_per_disk * bad_disks[i], sizeof(Packet), items_per_disk, bad_disk_fp[i]);
+            mmwrite(data + items_per_disk * bad_disks[i], sizeof(Packet) * items_per_disk, &bad_disk_fp[i]);
         }
     }
     return Success;
@@ -574,19 +573,19 @@ Error write_cooked_chunk_to_bad_disk(Chunk *chunk, FILE *bad_disk_fp[2], int bad
  *
  * 该函数并不会将修复的结果写回到磁盘中，且对读取到的 chunk 不合法的情况不做处理。
  */
-Error read_cooked_chunk(Chunk *chunk, FILE *files[]) {
+Error read_cooked_chunk(Chunk *chunk, MMIO files[]) {
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
 
     for (int i = 0; i < disk_num; ++i) {
-        if (files[i] == NULL) {
+        if (files[i].fd == -1) {
             memset(data, 0, items_per_disk * sizeof(Packet));
         } else {
 #ifndef NDEBUG
             size_t ok =
 #endif
-                fread(data, 1, sizeof(Packet) * items_per_disk, files[i]);
+                mmread(data, sizeof(Packet) * items_per_disk, &files[i]);
 #ifndef NDEBUG
             if (ok < items_per_disk * sizeof(Packet)) {
                 fprintf(stderr, "bad read at line %d, read %zu bytes\n", __LINE__, ok);
@@ -626,16 +625,16 @@ typedef struct {
  *
  * 调用者需要保证文件正确打开，且其中确实有 Metadata
  */
-void skip_metadata(FILE *file) {
+void skip_metadata(MMIO *file) {
     Metadata data;
-    fread(&data, sizeof(data), 1, file);
+    mmread(&data, sizeof(data), file);
 }
 
 /**
  * write_metadata() - 将 Metadata 写入文件
  */
-void write_metadata(Metadata data, FILE *file) {
-    fwrite(&data, sizeof(data), 1, file);
+void write_metadata(Metadata data, MMIO *file) {
+    mmwrite(&data, sizeof(data), file);
 }
 
 /**
@@ -681,18 +680,20 @@ Metadata get_cooked_file_metadata(const char *filename) {
     return result;
 }
 
+size_t disk_file_size(Metadata *x) {
+    size_t size = sizeof(Metadata);
+    size += (x->p - 1) * sizeof(Packet) * x->full_chunk_num;
+    if (x->last_chunk_data_size != 0)
+        size += (x->p - 1) * sizeof(Packet);
+    return size;
+}
+
 /**
  * read_file() - 题目规定的 read 操作实现
  */
 void read_file(char *filename, const char *save_as) {
-    FILE *out[1] = {
-        fopen(save_as, "wb")
-    };
-#ifdef BIGBUF
-    setvbuf(out[0], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
-#endif
-
-    FILE *in[PMAX + 2]; // FIXME: dirty hack
+    MMIO out[1];
+    MMIO in[PMAX + 2]; // FIXME: dirty hack
     int bad_disks[2] = { -1, -1 };
     int bad_disk_num = 0;
 
@@ -700,20 +701,19 @@ void read_file(char *filename, const char *save_as) {
     Metadata meta = get_cooked_file_metadata(filename);
     int p = meta.p;
 
+    mmwr_open(&out[0], save_as, meta.size);
+
     simple_hash(filename);
 
     /* 打开文件所保存的 p+2 个磁盘 */
     for (int i = 0; i < p + 2; ++i) {
         char path[PATH_MAX];
         sprintf(path, "disk_%d/%s", i, filename);
-        in[i] = fopen(path, "rb");
+        mmrd_open(&in[i], path, disk_file_size(&meta));
 
         /* 跳过磁盘开头的 Metadata */
-        if (in[i] != NULL) {
-#ifdef BIGBUF
-            setvbuf(in[i], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
-#endif
-            skip_metadata(in[i]);
+        if (in[i].fd != -1) {
+            skip_metadata(&in[i]);
         } else {
             if (bad_disk_num == 2) {
                 puts("File corrupted!");
@@ -803,18 +803,15 @@ void read_file(char *filename, const char *save_as) {
  * write_file() - 题目规定的 write 操作实现
  */
 void write_file(char *file_to_read, int p) {
-    FILE *in[1] = {
-        fopen(file_to_read, "rb")
-    };
-#ifdef BIGBUF
-    setvbuf(in[0], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
-#endif
-    FILE *out[PMAX + 2]; // FIXME: dirty hack
+    MMIO in[1];
+    MMIO out[PMAX + 2]; // FIXME: dirty hack
 
     /* 获取文件的 Metadata */
     Metadata meta = get_raw_file_metadata(file_to_read, p);
 
     simple_hash(file_to_read);
+
+    mmrd_open(&in[0], file_to_read, meta.size);
 
     /* 准备保存文件所需要的 p+2 个磁盘 */
     for (int i = 0; i < p + 2; ++i) {
@@ -822,11 +819,9 @@ void write_file(char *file_to_read, int p) {
         sprintf(path, "disk_%d", i);
         mkdir(path, 0755);
         sprintf(path, "disk_%d/%s", i, file_to_read);
-        out[i] = fopen(path, "wb");
-#ifdef BIGBUF
-        setvbuf(out[i], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
-#endif
-        write_metadata(meta, out[i]);
+        errno = 0;
+        mmwr_open(&out[i], path, disk_file_size(&meta));
+        write_metadata(meta, &out[i]);
     }
 
     int rwnum = meta.full_chunk_num;
@@ -864,7 +859,8 @@ void write_file(char *file_to_read, int p) {
             cpu_block_cnt += 1;
 #endif
         Chunk *chunk = SpscQueue_pop(&qin);
-        cook_chunk(chunk);
+        cook_chunk_r1(chunk);
+        cook_chunk_r2(chunk);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
@@ -880,8 +876,8 @@ void write_file(char *file_to_read, int p) {
  * repair_file() - 题目规定的 repair 操作实现
  */
 void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
-    FILE *in[PMAX + 2]; // FIXME: dirty hack
-    FILE *out[2] = { NULL, NULL };
+    MMIO in[PMAX + 2]; // FIXME: dirty hack
+    MMIO out[2];
     char path[PATH_MAX];
 
     /* 从 raid 中读取文件的 Metadata */
@@ -893,26 +889,19 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
         sprintf(path, "disk_%d", i);
         mkdir(path, 0755);
         sprintf(path, "disk_%d/%s", i, fname);
-        in[i] = fopen(path, "rb");
+        mmrd_open(&in[i], path, disk_file_size(&meta));
 
         /* 跳过磁盘开头的 Metadata */
-        if (in[i] != NULL) {
-#ifdef BIGBUF
-            setvbuf(in[i], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
-#endif
-            skip_metadata(in[i]);
-
+        if (in[i].fd != -1) {
+            skip_metadata(&in[i]);
         }
     }
 
     /* 重建损坏的两个磁盘，并且打开准备写入 */
     for (int i = 0; i < bad_disk_num; ++i) {
         sprintf(path, "disk_%d/%s", bad_disks[i], fname);
-        out[i] = fopen(path, "wb");
-#ifdef BIGBUF
-        setvbuf(out[i], malloc(BIGBUFSIZE), _IOFBF, BIGBUFSIZE);
-#endif
-        write_metadata(meta, out[i]);
+        mmwr_open(&out[i], path, disk_file_size(&meta));
+        write_metadata(meta, &out[i]);
     }
 
     Error (*repair)(Chunk *, int, int);
