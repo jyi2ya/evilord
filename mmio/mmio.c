@@ -6,7 +6,7 @@
 #include "mmio.h"
 #include <string.h>
 
-#define MMIO_RDMAP_OPTION (MAP_NORESERVE | MAP_POPULATE | MAP_PRIVATE)
+#define MMIO_RDMAP_OPTION (MAP_NORESERVE | MAP_PRIVATE)
 #define MMIO_WRMAP_OPTION (MAP_NORESERVE | MAP_SHARED)
 
 #define min(x, y) ((x) < (y) ? (x) : (y))
