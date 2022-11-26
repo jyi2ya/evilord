@@ -3,14 +3,10 @@
 
 #include <stddef.h>
 
-#define MMSIZE 8388608U
-
 typedef struct {
     int fd;
     size_t size;
-    size_t mapped;
     size_t pos;
-    size_t bufsize;
     void *buf;
 } MMIO;
 
