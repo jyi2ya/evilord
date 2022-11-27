@@ -283,32 +283,6 @@ inline Error cook_chunk(Chunk *chunk) {
     return Success;
 }
 
-Error repair_0bad(UNUSED_PARAM Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
-    return Success;
-}
-
-Error repair_1bad(Chunk *chunk, int bad_disk, UNUSED_PARAM int _) {
-    /* 仅一个磁盘损坏 */
-    if (bad_disk <= chunk->p) {
-        /* 坏掉的磁盘是前 p+1 个，可以通过简单异或恢复 */
-        for (int i = 0; i < chunk->p - 1; ++i)
-            PZERO(AT(i, bad_disk));
-        for (int j = 0; j <= chunk->p; ++j) {
-            if (j == bad_disk) {
-                continue;
-            }
-            for (int i = 0; i < chunk->p - 1; ++i) {
-                PXOR(AT(i, bad_disk), AT(i, j));
-            }
-        }
-    } else {
-        /* 坏掉的磁盘是魔法对角线的校验值 */
-        /* 重新计算魔法对角线的校验值 */
-        cook_chunk_r2(chunk);
-    }
-    return Success;
-}
-
 Error repair_2bad_case1(Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
     /* i == m && j == m + 1 */
     cook_chunk_r1(chunk);
@@ -723,27 +697,35 @@ void read_file(char *filename, const char *save_as) {
         }
     }
 
+    if (bad_disk_num == 0) {
+        mmrd_close(&in[p]);
+        mmrd_close(&in[p + 1]);
+        bad_disks[0] = p;
+        bad_disks[1] = p + 1;
+    } else if (bad_disk_num == 1) {
+        if (bad_disks[0] == p + 1) {
+            mmrd_close(&in[p]);
+            bad_disks[0] = p;
+            bad_disks[1] = p + 1;
+        } else {
+            mmrd_close(&in[p + 1]);
+            bad_disks[1] = p + 1;
+        }
+    }
+
     Error (*repair)(Chunk *, int, int);
 
-    if (bad_disk_num == 0) {
-        repair = repair_0bad;
-    } else if (bad_disk_num == 1) {
-        repair = repair_1bad;
-    } else if (bad_disk_num == 2) {
-        int i = bad_disks[0], j = bad_disks[1];
-        if (i == p && j == p + 1) {
-            repair = repair_2bad_case1;
-            /* 损坏的是两个保存校验值的磁盘 */
-        } else if (i < p && j == p) {
-            repair = repair_2bad_case2;
-        } else if (i < p && j == p + 1) {
-            /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
-            repair = repair_2bad_case3;
-        } else { // i < p and j < p
-            repair = repair_2bad_case4;
-        }
-    } else {
-        repair = NULL;
+    int i = bad_disks[0], j = bad_disks[1];
+    if (i == p && j == p + 1) {
+        repair = repair_2bad_case1;
+        /* 损坏的是两个保存校验值的磁盘 */
+    } else if (i < p && j == p) {
+        repair = repair_2bad_case2;
+    } else if (i < p && j == p + 1) {
+        /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
+        repair = repair_2bad_case3;
+    } else { // i < p and j < p
+        repair = repair_2bad_case4;
     }
 
     SpscQueue qin = SpscQueue_new(2244);
@@ -768,15 +750,18 @@ void read_file(char *filename, const char *save_as) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
-    int rwnum = meta.full_chunk_num;
+    size_t rwnum = meta.full_chunk_num;
 #ifdef PERFCNT
-    int cpu_block_cnt = 0;
+    size_t cpu_block_cnt = 0;
+    size_t disk_block_cnt = 0;
 #endif
     /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
-    for (int i = 0; i < rwnum; ++i) {
+    for (size_t i = 0; i < rwnum; ++i) {
 #ifdef PERFCNT
         if (SpscQueue_full(&qin))
             cpu_block_cnt += 1;
+        if (SpscQueue_full(&qout))
+            disk_block_cnt += 1;
 #endif
         Chunk *chunk = SpscQueue_pop(&qin);
         repair(chunk, bad_disks[0], bad_disks[1]);
@@ -784,7 +769,8 @@ void read_file(char *filename, const char *save_as) {
     }
     pthread_join(tid, NULL);
 #ifdef PERFCNT
-    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+    fprintf(stderr, "blocked by cpu: %zu/%zu, %zu%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+    fprintf(stderr, "blocked by disk: %zu/%zu, %zu%%\n", disk_block_cnt, rwnum, disk_block_cnt * 100 / (rwnum + 1));
 #endif
 
     if (meta.last_chunk_data_size != 0) {
@@ -824,7 +810,7 @@ void write_file(char *file_to_read, int p) {
         write_metadata(meta, &out[i]);
     }
 
-    int rwnum = meta.full_chunk_num;
+    size_t rwnum = meta.full_chunk_num;
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
@@ -851,12 +837,15 @@ void write_file(char *file_to_read, int p) {
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
 #ifdef PERFCNT
-    int cpu_block_cnt = 0;
+    size_t cpu_block_cnt = 0;
+    size_t disk_block_cnt = 0;
 #endif
-    for (int i = 0; i < rwnum; ++i) {
+    for (size_t i = 0; i < rwnum; ++i) {
 #ifdef PERFCNT
         if (SpscQueue_full(&qin))
             cpu_block_cnt += 1;
+        if (SpscQueue_full(&qout))
+            disk_block_cnt += 1;
 #endif
         Chunk *chunk = SpscQueue_pop(&qin);
         cook_chunk_r1(chunk);
@@ -865,7 +854,8 @@ void write_file(char *file_to_read, int p) {
     }
     pthread_join(tid, NULL);
 #ifdef PERFCNT
-    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+    fprintf(stderr, "blocked by cpu: %zu/%zu, %zu%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+    fprintf(stderr, "blocked by disk: %zu/%zu, %zu%%\n", disk_block_cnt, rwnum, disk_block_cnt * 100 / (rwnum + 1));
 #endif
 
     SpscQueue_drop(&qin);
@@ -884,21 +874,34 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
     Metadata meta = get_cooked_file_metadata(fname);
 
     int p = meta.p;
+
+    if (bad_disk_num == 0) {
+        bad_disks[0] = p;
+        bad_disks[1] = p + 1;
+    } else if (bad_disk_num == 1) {
+        if (bad_disks[0] == p + 1) {
+            bad_disks[0] = p;
+            bad_disks[1] = p + 1;
+        } else {
+            bad_disks[1] = p + 1;
+        }
+    }
+
     /* 打开文件所保存的 p+2 个磁盘 */
     for (int i = 0; i < meta.p + 2; ++i) {
-        sprintf(path, "disk_%d", i);
-        mkdir(path, 0755);
-        sprintf(path, "disk_%d/%s", i, fname);
-        mmrd_open(&in[i], path, disk_file_size(&meta));
-
-        /* 跳过磁盘开头的 Metadata */
-        if (in[i].fd != -1) {
+        if (i != bad_disks[0] && i != bad_disks[1]) {
+            sprintf(path, "disk_%d", i);
+            mkdir(path, 0755);
+            sprintf(path, "disk_%d/%s", i, fname);
+            mmrd_open(&in[i], path, disk_file_size(&meta));
             skip_metadata(&in[i]);
+        } else {
+            in[i].fd = -1;
         }
     }
 
     /* 重建损坏的两个磁盘，并且打开准备写入 */
-    for (int i = 0; i < bad_disk_num; ++i) {
+    for (int i = 0; i < 2; ++i) {
         sprintf(path, "disk_%d/%s", bad_disks[i], fname);
         mmwr_open(&out[i], path, disk_file_size(&meta));
         write_metadata(meta, &out[i]);
@@ -906,28 +909,20 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
 
     Error (*repair)(Chunk *, int, int);
 
-    if (bad_disk_num == 0) {
-        repair = repair_0bad;
-    } else if (bad_disk_num == 1) {
-        repair = repair_1bad;
-    } else if (bad_disk_num == 2) {
-        int i = bad_disks[0], j = bad_disks[1];
-        if (i == p && j == p + 1) {
-            repair = repair_2bad_case1;
-            /* 损坏的是两个保存校验值的磁盘 */
-        } else if (i < p && j == p) {
-            repair = repair_2bad_case2;
-        } else if (i < p && j == p + 1) {
-            /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
-            repair = repair_2bad_case3;
-        } else { // i < p and j < p
-            repair = repair_2bad_case4;
-        }
-    } else {
-        repair = NULL;
+    int i = bad_disks[0], j = bad_disks[1];
+    if (i == p && j == p + 1) {
+        repair = repair_2bad_case1;
+        /* 损坏的是两个保存校验值的磁盘 */
+    } else if (i < p && j == p) {
+        repair = repair_2bad_case2;
+    } else if (i < p && j == p + 1) {
+        /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
+        repair = repair_2bad_case3;
+    } else { // i < p and j < p
+        repair = repair_2bad_case4;
     }
 
-    int rwnum = meta.full_chunk_num;
+    size_t rwnum = meta.full_chunk_num;
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
@@ -954,12 +949,15 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
 #ifdef PERFCNT
-    int cpu_block_cnt = 0;
+    size_t cpu_block_cnt = 0;
+    size_t disk_block_cnt = 0;
 #endif
-    for (int i = 0; i < rwnum; ++i) {
+    for (size_t i = 0; i < rwnum; ++i) {
 #ifdef PERFCNT
         if (SpscQueue_full(&qin))
             cpu_block_cnt += 1;
+        if (SpscQueue_full(&qout))
+            disk_block_cnt += 1;
 #endif
         Chunk *chunk = SpscQueue_pop(&qin);
         repair(chunk, bad_disks[0], bad_disks[1]);
@@ -967,7 +965,8 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
     }
     pthread_join(tid, NULL);
 #ifdef PERFCNT
-    fprintf(stderr, "blocked by cpu: %d/%d, %d%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+    fprintf(stderr, "blocked by cpu: %zu/%zu, %zu%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
+    fprintf(stderr, "blocked by disk: %zu/%zu, %zu%%\n", disk_block_cnt, rwnum, disk_block_cnt * 100 / (rwnum + 1));
 #endif
 
     SpscQueue_drop(&qin);
