@@ -21,6 +21,8 @@
 #define UNUSED_PARAM_RESULT
 #endif
 
+#define QUEUESIZE 6124
+
 char *simple_hash(char *str) {
     for (int i = 0; str[i] != '\0'; ++i) {
         if (str[i] == '/') {
@@ -425,25 +427,43 @@ typedef struct {
 } IOCtx;
 
 void io_loop(ReadCtx readctx, WriteCtx writectx) {
-    while (readctx.times > 0) {
-        if (SpscQueue_full(writectx.queue) || SpscQueue_full(readctx.queue)) {
-            Chunk *chunk = SpscQueue_pop(writectx.queue);
-            writectx.writer(chunk, writectx.files, writectx.option);
-            free(chunk);
-            writectx.times -= 1;
-        } else {
-            Chunk *chunk = chunk_new(readctx.p);
-            readctx.reader(chunk, readctx.files);
-            SpscQueue_push(readctx.queue, chunk);
-            readctx.times -= 1;
-        }
-    }
+    enum {
+        IO_PREFER_RD,
+        IO_PREFER_WR,
+        IO_ONLY_WR,
+    } state = IO_PREFER_RD;
+    Chunk *chunk;
 
-    while (writectx.times > 0) {
-        Chunk *chunk = SpscQueue_pop(writectx.queue);
-        writectx.writer(chunk, writectx.files, writectx.option);
-        free(chunk);
-        writectx.times -= 1;
+    while (writectx.times != 0) {
+        switch (state) {
+            case IO_PREFER_RD:
+                chunk = chunk_new(readctx.p);
+                readctx.reader(chunk, readctx.files);
+                SpscQueue_push(readctx.queue, chunk);
+                readctx.times -= 1;
+
+                if (readctx.times == 0)
+                    state = IO_ONLY_WR;
+                if (SpscQueue_full(readctx.queue))
+                    state = IO_PREFER_WR;
+                break;
+
+            case IO_PREFER_WR:
+                chunk = SpscQueue_pop(writectx.queue);
+                writectx.writer(chunk, writectx.files, writectx.option);
+                free(chunk);
+                writectx.times -= 1;
+
+                if (SpscQueue_empty(writectx.queue))
+                    state = IO_PREFER_RD;
+                break;
+
+            case IO_ONLY_WR:
+                chunk = SpscQueue_pop(writectx.queue);
+                writectx.writer(chunk, writectx.files, writectx.option);
+                free(chunk);
+                writectx.times -= 1;
+        }
     }
 
     pthread_exit(NULL);
@@ -728,8 +748,8 @@ void read_file(char *filename, const char *save_as) {
         repair = repair_2bad_case4;
     }
 
-    SpscQueue qin = SpscQueue_new(2244);
-    SpscQueue qout = SpscQueue_new(2244);
+    SpscQueue qin = SpscQueue_new(QUEUESIZE);
+    SpscQueue qout = SpscQueue_new(QUEUESIZE);
     IOCtx ioctx = {
         .writectx = {
             .files = out,
@@ -805,8 +825,8 @@ void write_file(char *file_to_read, int p) {
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
-    SpscQueue qin = SpscQueue_new(2244);
-    SpscQueue qout = SpscQueue_new(2244);
+    SpscQueue qin = SpscQueue_new(QUEUESIZE);
+    SpscQueue qout = SpscQueue_new(QUEUESIZE);
     IOCtx ioctx = {
         .writectx = {
             .files = out,
@@ -909,8 +929,8 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
-    SpscQueue qin = SpscQueue_new(2244);
-    SpscQueue qout = SpscQueue_new(2244);
+    SpscQueue qin = SpscQueue_new(QUEUESIZE);
+    SpscQueue qout = SpscQueue_new(QUEUESIZE);
     IOCtx ioctx = {
         .writectx = {
             .files = out,
