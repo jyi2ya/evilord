@@ -52,10 +52,13 @@ int SpscQueue_full(SpscQueue *self) {
 }
 
 void SpscQueue_push(SpscQueue *self, ItemType data) {
+    // FIXME: barrier: magic
+    write_barrier();
     if (SpscQueue_full(self)) {
         self->push.wait += 1;
     }
     self->push.cnt += 1;
+    write_barrier();
 
     while (SpscQueue_full(self))
         ;
@@ -66,9 +69,13 @@ void SpscQueue_push(SpscQueue *self, ItemType data) {
 }
 
 ItemType SpscQueue_pop(SpscQueue *self) {
-    if (SpscQueue_empty(self))
+    // FIXME: barrier: magic
+    write_barrier();
+    if (SpscQueue_empty(self)) {
         self->pop.wait += 1;
+    }
     self->pop.cnt += 1;
+    write_barrier();
 
     while (SpscQueue_empty(self))
         ;
