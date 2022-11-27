@@ -8,8 +8,8 @@ mkdir -p test
 cd test || exit 1
 
 deploy() {
-    dd status=none if=/dev/urandom of=test.bin bs="$filesize" count=1 iflag=fullblock &
-    dd status=none if=/dev/urandom of=test2.bin bs="$((filesize * 3))" count=1 iflag=fullblock &
+    dd status=none if=/dev/urandom of=test.bin bs="$filesize" count=1 iflag=fullblock
+    dd status=none if=/dev/urandom of=test2.bin bs="$((filesize * 3))" count=1 iflag=fullblock
 
     for p in 101 31 47 97 3 5 7; do
 	wait
@@ -17,25 +17,25 @@ deploy() {
 		rm -rf test1
 		mkdir -p test1
 		cd test1
-		cp ../test.bin . &
-		cp ../test2.bin . &
+		cp ../test.bin .
+		cp ../test2.bin .
 		wait
-		../../evenodd write test.bin "$p" &
-		../../evenodd write test2.bin "$p" &
+		../../evenodd write test.bin "$p"
+		../../evenodd write test2.bin "$p"
 		wait
-	} &
+	}
 
 	{
 		rm -rf test2
 		mkdir -p test2
 		cd test2
-		cp ../test.bin . &
-		cp ../test2.bin . &
+		cp ../test.bin .
+		cp ../test2.bin .
 		wait
-		../../evenodd write test.bin "$p" &
-		../../evenodd write test2.bin "$p" &
+		../../evenodd write test.bin "$p"
+		../../evenodd write test2.bin "$p"
 		wait
-	} &
+	}
 
 	wait
 	eval "$failtype"
