@@ -10,8 +10,8 @@
 #define MMIO_RDMAP_MADVICE (MADV_SEQUENTIAL | MADV_WILLNEED)
 #define MMIO_RDMAP_FADVICE (POSIX_FADV_SEQUENTIAL | POSIX_FADV_WILLNEED | POSIX_FADV_NOREUSE)
 #define MMIO_WRMAP_OPTION (MAP_NORESERVE | MAP_SHARED)
-#define MMIO_WRMAP_MADVICE (MADV_SEQUENTIAL | MADV_WILLNEED)
-#define MMIO_WRMAP_FADVICE (POSIX_FADV_SEQUENTIAL | POSIX_FADV_WILLNEED | POSIX_FADV_NOREUSE)
+#define MMIO_WRMAP_MADVICE (MADV_DONTNEED)
+#define MMIO_WRMAP_FADVICE (POSIX_FADV_DONTNEED)
 
 #define min(x, y) ((x) < (y) ? (x) : (y))
 
@@ -29,6 +29,7 @@ void mmrd_open(MMIO *x, const char *fname, size_t size) {
 void mmrd_close(MMIO *x) {
     munmap(x->buf, x->size);
     close(x->fd);
+    x->fd = -1;
 }
 
 size_t mmread(void *buf, size_t size, MMIO *x) {
@@ -53,6 +54,7 @@ void mmwr_open(MMIO *x, const char *fname, size_t size) {
 void mmwr_close(MMIO *x) {
     munmap(x->buf, x->size);
     close(x->fd);
+    x->fd = -1;
 }
 
 size_t mmwrite(void *buf, size_t size, MMIO *x) {
