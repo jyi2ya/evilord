@@ -13,7 +13,7 @@ deploy() {
 
     for p in 101 31 47 97 3 5 7; do
 	wait
-	{
+	(
 		rm -rf test1
 		mkdir -p test1
 		cd test1
@@ -23,9 +23,9 @@ deploy() {
 		../../evenodd write test.bin "$p"
 		../../evenodd write test2.bin "$p"
 		wait
-	}
+	)
 
-	{
+	(
 		rm -rf test2
 		mkdir -p test2
 		cd test2
@@ -35,7 +35,7 @@ deploy() {
 		../../evenodd write test.bin "$p"
 		../../evenodd write test2.bin "$p"
 		wait
-	}
+	)
 
 	wait
 	eval "$failtype"

@@ -5,19 +5,24 @@ set -e
 exec 2>&1
 
 cd "$(dirname "$0")/.." || exit 1
-sh compile.sh -O2
+gcc -O2 -DPERFCNT -DNDEBUG -pthread -std=gnu11 -o evenodd mmio/mmio.c spsc/spsc.c evenodd.c -Wall -Wextra -Wshadow
 mkdir -p test
 cd test || exit 1
 
-echo file size 2GB
-filesize=$((1024 * 1024 * 1024 * 2))
-dd if=/dev/urandom of=test.bin bs="$filesize" count=1 iflag=fullblock
+echo file size 4GB
+filesize=$((1024 * 1024 * 1024 * 4))
+
+if [ "$(stat -c '%s' test.bin)" -ne "$filesize" ]; then
+	dd if=/dev/urandom of=test.bin bs="$((filesize / 1024))" count=1024 iflag=fullblock
+fi
 
 timeit() {
+	sync
 	begin=$(date +%s)
-    eval "$@"
+	eval "$*"
 	end=$(date +%s)
 	speed=$((filesize / (end - begin + 1) * 100 / 1024 / 1024 ))
+	echo -n "$((end - begin))s "
 	echo -n "$speed" | sed 's/\(..\)$/.\1/'
 	echo -n " MB/s "
 }
@@ -25,30 +30,30 @@ timeit() {
 do_test() {
     p="$1"
     rm -rf disk_*
-    echo write p=$p filesize=$filesize
     timeit ../evenodd write test.bin "$p"
+    echo -n "write p=$p filesize=$filesize: "
     echo "$((speed * 100 / cp_speed))% cp speed"
 
-    echo read p=$p filesize=$filesize
     timeit ../evenodd read test.bin test.bin.rtv
+    echo -n "read p=$p filesize=$filesize: "
+    echo "$((speed * 100 / cp_speed))% cp speed"
+
     rm -rf disk_2
-    echo "$((speed * 100 / cp_speed))% cp speed"
-
-    echo repair1 p=$p filesize=$filesize
     timeit ../evenodd repair 1 2
-    rm -rf disk_2 disk_3
+    echo -n "repair1 p=$p filesize=$filesize: "
     echo "$((speed * 100 / cp_speed))% cp speed"
 
-    echo repair2 p=$p filesize=$filesize
+    rm -rf disk_2 disk_3
     timeit ../evenodd repair 2 2 3
+    echo -n "repair2 p=$p filesize=$filesize: "
     echo "$((speed * 100 / cp_speed))% cp speed"
 }
 
 rm -rf disk_*
-echo copy
 mkdir -p disk_0
-timeit dd if=test.bin of=disk_0/test.bin iflag=fullblock
+timeit /bin/cp test.bin disk_0/test.bin
 cp_speed="$speed"
+echo -n "/bin/cp: "
 echo "$((speed * 100 / cp_speed))% cp speed"
 
 do_test 3
