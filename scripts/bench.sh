@@ -51,7 +51,7 @@ do_test() {
 
 rm -rf disk_*
 mkdir -p disk_0
-timeit /bin/cp test.bin disk_0/test.bin
+timeit /bin/dd if=test.bin of=disk_0/test.bin
 cp_speed="$speed"
 echo -n "/bin/cp: "
 echo "$((speed * 100 / cp_speed))% cp speed"
