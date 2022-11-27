@@ -20,6 +20,10 @@ typedef struct {
     volatile unsigned int out;
     unsigned int mask;
     ItemType * volatile data;
+    struct {
+        size_t wait;
+        size_t cnt;
+    } push, pop;
 } SpscQueue;
 
 SpscQueue SpscQueue_new(unsigned int size);
@@ -33,3 +37,5 @@ void SpscQueue_push(SpscQueue *self, ItemType data);
 int SpscQueue_full(SpscQueue *self);
 
 ItemType SpscQueue_pop(SpscQueue *self);
+
+void SpscQueue_perf(SpscQueue *self, const char *prompt);

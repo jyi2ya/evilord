@@ -751,26 +751,17 @@ void read_file(char *filename, const char *save_as) {
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
     size_t rwnum = meta.full_chunk_num;
-#ifdef PERFCNT
-    size_t cpu_block_cnt = 0;
-    size_t disk_block_cnt = 0;
-#endif
     /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
     for (size_t i = 0; i < rwnum; ++i) {
-#ifdef PERFCNT
-        if (SpscQueue_full(&qin))
-            cpu_block_cnt += 1;
-        if (SpscQueue_full(&qout))
-            disk_block_cnt += 1;
-#endif
         Chunk *chunk = SpscQueue_pop(&qin);
         repair(chunk, bad_disks[0], bad_disks[1]);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
+
 #ifdef PERFCNT
-    fprintf(stderr, "blocked by cpu: %zu/%zu, %zu%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
-    fprintf(stderr, "blocked by disk: %zu/%zu, %zu%%\n", disk_block_cnt, rwnum, disk_block_cnt * 100 / (rwnum + 1));
+    SpscQueue_perf(&qin, "qin ");
+    SpscQueue_perf(&qout, "qout");
 #endif
 
     if (meta.last_chunk_data_size != 0) {
@@ -836,26 +827,17 @@ void write_file(char *file_to_read, int p) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
-#ifdef PERFCNT
-    size_t cpu_block_cnt = 0;
-    size_t disk_block_cnt = 0;
-#endif
     for (size_t i = 0; i < rwnum; ++i) {
-#ifdef PERFCNT
-        if (SpscQueue_full(&qin))
-            cpu_block_cnt += 1;
-        if (SpscQueue_full(&qout))
-            disk_block_cnt += 1;
-#endif
         Chunk *chunk = SpscQueue_pop(&qin);
         cook_chunk_r1(chunk);
         cook_chunk_r2(chunk);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
+
 #ifdef PERFCNT
-    fprintf(stderr, "blocked by cpu: %zu/%zu, %zu%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
-    fprintf(stderr, "blocked by disk: %zu/%zu, %zu%%\n", disk_block_cnt, rwnum, disk_block_cnt * 100 / (rwnum + 1));
+    SpscQueue_perf(&qin, "qin ");
+    SpscQueue_perf(&qout, "qout");
 #endif
 
     SpscQueue_drop(&qin);
@@ -948,25 +930,16 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
-#ifdef PERFCNT
-    size_t cpu_block_cnt = 0;
-    size_t disk_block_cnt = 0;
-#endif
     for (size_t i = 0; i < rwnum; ++i) {
-#ifdef PERFCNT
-        if (SpscQueue_full(&qin))
-            cpu_block_cnt += 1;
-        if (SpscQueue_full(&qout))
-            disk_block_cnt += 1;
-#endif
         Chunk *chunk = SpscQueue_pop(&qin);
         repair(chunk, bad_disks[0], bad_disks[1]);
         SpscQueue_push(&qout, chunk);
     }
     pthread_join(tid, NULL);
+
 #ifdef PERFCNT
-    fprintf(stderr, "blocked by cpu: %zu/%zu, %zu%%\n", cpu_block_cnt, rwnum, cpu_block_cnt * 100 / (rwnum + 1));
-    fprintf(stderr, "blocked by disk: %zu/%zu, %zu%%\n", disk_block_cnt, rwnum, disk_block_cnt * 100 / (rwnum + 1));
+    SpscQueue_perf(&qin, "qin ");
+    SpscQueue_perf(&qout, "qout");
 #endif
 
     SpscQueue_drop(&qin);
