@@ -1,22 +1,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
-#include "../mmio/mmio.h"
 int main(int argc, char *argv[]) {
     assert(argc == 3);
     size_t filesize = atoll(argv[2]);
     void *buf = malloc(1024);
-    MMIO mmio;
-    mmrd_open(&mmio, argv[1], filesize);
+    FILE *fp = fopen(argv[1], "rb");
+    setvbuf(fp, NULL, _IOFBF, 128 * 1024);
     char res = 0;
     size_t nbytes;
-    while ((nbytes = mmread(buf, 1024, &mmio))) {
+    while ((nbytes = fread(buf, 1, 1024, fp))) {
         char *s = buf;
         for (size_t i = 0; i < nbytes; ++i) {
             res += *s++;
         }
     }
-    mmrd_close(&mmio);
+    fclose(fp);
     printf("useless sum: %d\n", res);
     free(buf);
     return 0;
