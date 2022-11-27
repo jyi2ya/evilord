@@ -858,8 +858,7 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
     int p = meta.p;
 
     if (bad_disk_num == 0) {
-        bad_disks[0] = p;
-        bad_disks[1] = p + 1;
+        return;
     } else if (bad_disk_num == 1) {
         if (bad_disks[0] == p + 1) {
             bad_disks[0] = p;
@@ -884,6 +883,8 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
 
     /* 重建损坏的两个磁盘，并且打开准备写入 */
     for (int i = 0; i < 2; ++i) {
+        sprintf(path, "disk_%d", bad_disks[i]);
+        mkdir(path, 0755);
         sprintf(path, "disk_%d/%s", bad_disks[i], fname);
         mmwr_open(&out[i], path, disk_file_size(&meta));
         write_metadata(meta, &out[i]);
