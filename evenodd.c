@@ -691,13 +691,13 @@ void read_file(char *filename, const char *save_as) {
     int bad_disks[2] = { -1, -1 };
     int bad_disk_num = 0;
 
+    simple_hash(filename);
+
     /* 从 raid 中获取文件的 Metadata */
     Metadata meta = get_cooked_file_metadata(filename);
     int p = meta.p;
 
     mmwr_open(&out[0], save_as, meta.size);
-
-    simple_hash(filename);
 
     /* 打开文件所保存的 p+2 个磁盘 */
     for (int i = 0; i < p + 2; ++i) {
@@ -806,9 +806,9 @@ void write_file(char *file_to_read, int p) {
     /* 获取文件的 Metadata */
     Metadata meta = get_raw_file_metadata(file_to_read, p);
 
-    simple_hash(file_to_read);
-
     mmrd_open(&in[0], file_to_read, meta.size);
+
+    simple_hash(file_to_read);
 
     /* 准备保存文件所需要的 p+2 个磁盘 */
     for (int i = 0; i < p + 2; ++i) {
