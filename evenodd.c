@@ -442,10 +442,11 @@ void io_loop(ReadCtx readctx, WriteCtx writectx) {
                 SpscQueue_push(readctx.queue, chunk);
                 readctx.times -= 1;
 
-                if (readctx.times == 0)
+                if (readctx.times == 0) {
                     state = IO_ONLY_WR;
-                if (SpscQueue_full(readctx.queue))
+                } else if (SpscQueue_full(readctx.queue)) {
                     state = IO_PREFER_WR;
+                }
                 break;
 
             case IO_PREFER_WR:
