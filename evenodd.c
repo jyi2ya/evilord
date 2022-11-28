@@ -888,20 +888,43 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
         bad_disk_num -= 1;
     }
 
+
+    int skip_disks[2] = { bad_disks[0], bad_disks[1] };
+    int i, j;
     if (bad_disk_num == 0) {
         return;
     } else if (bad_disk_num == 1) {
         if (bad_disks[0] == p + 1) {
-            bad_disks[0] = p;
-            bad_disks[1] = p + 1;
+            skip_disks[1] = p;
+            i = p;
+            j = p + 1;
         } else {
-            bad_disks[1] = p + 1;
+            skip_disks[1] = p + 1;
+            i = bad_disks[0];
+            j = p + 1;
         }
+    } else {
+        i = bad_disks[0];
+        j = bad_disks[1];
+    }
+
+    Error (*repair)(Chunk *, int, int);
+
+    if (i == p && j == p + 1) {
+        repair = repair_2bad_case1;
+        /* 损坏的是两个保存校验值的磁盘 */
+    } else if (i < p && j == p) {
+        repair = repair_2bad_case2;
+    } else if (i < p && j == p + 1) {
+        /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
+        repair = repair_2bad_case3;
+    } else { // i < p and j < p
+        repair = repair_2bad_case4;
     }
 
     /* 打开文件所保存的 p+2 个磁盘 */
     for (int i = 0; i < meta.p + 2; ++i) {
-        if (i != bad_disks[0] && i != bad_disks[1]) {
+        if (i != skip_disks[0] && i != skip_disks[1]) {
             sprintf(path, "disk_%d", i);
             mkdir(path, 0755);
             sprintf(path, "disk_%d/%s", i, fname);
@@ -913,27 +936,12 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
     }
 
     /* 重建损坏的两个磁盘，并且打开准备写入 */
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < bad_disk_num; ++i) {
         sprintf(path, "disk_%d", bad_disks[i]);
         mkdir(path, 0755);
         sprintf(path, "disk_%d/%s", bad_disks[i], fname);
         mmwr_open(&out[i], path, disk_file_size(&meta));
         write_metadata(meta, &out[i]);
-    }
-
-    Error (*repair)(Chunk *, int, int);
-
-    int i = bad_disks[0], j = bad_disks[1];
-    if (i == p && j == p + 1) {
-        repair = repair_2bad_case1;
-        /* 损坏的是两个保存校验值的磁盘 */
-    } else if (i < p && j == p) {
-        repair = repair_2bad_case2;
-    } else if (i < p && j == p + 1) {
-        /* 损坏的是一块原始数据磁盘，和保存对角线校验值的磁盘 */
-        repair = repair_2bad_case3;
-    } else { // i < p and j < p
-        repair = repair_2bad_case4;
     }
 
     size_t rwnum = meta.full_chunk_num;
