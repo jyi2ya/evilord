@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <fcntl.h>
+
 int main(int argc, char *argv[]) {
     assert(argc == 3);
     size_t filesize = atoll(argv[2]);
