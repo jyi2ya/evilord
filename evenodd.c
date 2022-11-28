@@ -867,15 +867,25 @@ void write_file(char *file_to_read, int p) {
 /**
  * repair_file() - 题目规定的 repair 操作实现
  */
-void repair_file(const char *fname, int bad_disk_num, int bad_disks[2]) {
+void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
     MMIO in[PMAX + 2]; // FIXME: dirty hack
     MMIO out[2];
     char path[PATH_MAX];
+    int bad_disks[2] = { bad_disks_[0], bad_disks_[1] };
 
     /* 从 raid 中读取文件的 Metadata */
     Metadata meta = get_cooked_file_metadata(fname);
 
     int p = meta.p;
+
+    if (bad_disks[0] > p + 1) {
+        return;
+    }
+
+    if (bad_disks[1] > p + 1) {
+        bad_disks[1] = -1;
+        bad_disk_num -= 1;
+    }
 
     if (bad_disk_num == 0) {
         return;
