@@ -12,7 +12,7 @@ cd test || exit 1
 echo file size 4GB
 filesize=$((1024 * 1024 * 1024 * 4))
 
-if [ "$(stat -c '%s' test.bin)" -ne "$filesize" ]; then
+if ! [ -r test.bin ] || [ "$(stat -c '%s' test.bin)" -ne "$filesize" ]; then
 	dd if=/dev/urandom of=test.bin bs="$((filesize / 1024))" count=1024 iflag=fullblock
 fi
 
