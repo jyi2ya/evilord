@@ -21,7 +21,7 @@
 #define UNUSED_PARAM_RESULT
 #endif
 
-#define QUEUESIZE 6124
+#define QUEUESIZE 0xface
 
 char *simple_hash(char *str) {
     for (int i = 0; str[i] != '\0'; ++i) {
