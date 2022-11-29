@@ -773,7 +773,7 @@ void read_file(char *filename, const char *save_as) {
 
     size_t rwnum = meta.full_chunk_num;
     /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
-    for (size_t i = 0; i < rwnum; ++i) {
+    for (size_t k = 0; k < rwnum; ++k) {
         Chunk *chunk = SpscQueue_pop(&qin);
         repair(chunk, bad_disks[0], bad_disks[1]);
         SpscQueue_push(&qout, chunk);
@@ -923,25 +923,25 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
     }
 
     /* 打开文件所保存的 p+2 个磁盘 */
-    for (int i = 0; i < meta.p + 2; ++i) {
-        if (i != skip_disks[0] && i != skip_disks[1]) {
-            sprintf(path, "disk_%d", i);
+    for (int k = 0; k < meta.p + 2; ++k) {
+        if (k != skip_disks[0] && k != skip_disks[1]) {
+            sprintf(path, "disk_%d", k);
             mkdir(path, 0755);
-            sprintf(path, "disk_%d/%s", i, fname);
-            mmrd_open(&in[i], path, disk_file_size(&meta));
-            skip_metadata(&in[i]);
+            sprintf(path, "disk_%d/%s", k, fname);
+            mmrd_open(&in[k], path, disk_file_size(&meta));
+            skip_metadata(&in[k]);
         } else {
-            in[i].fd = -1;
+            in[k].fd = -1;
         }
     }
 
     /* 重建损坏的两个磁盘，并且打开准备写入 */
-    for (int i = 0; i < bad_disk_num; ++i) {
-        sprintf(path, "disk_%d", bad_disks[i]);
+    for (int k = 0; k < bad_disk_num; ++k) {
+        sprintf(path, "disk_%d", bad_disks[k]);
         mkdir(path, 0755);
-        sprintf(path, "disk_%d/%s", bad_disks[i], fname);
-        mmwr_open(&out[i], path, disk_file_size(&meta));
-        write_metadata(meta, &out[i]);
+        sprintf(path, "disk_%d/%s", bad_disks[k], fname);
+        mmwr_open(&out[k], path, disk_file_size(&meta));
+        write_metadata(meta, &out[k]);
     }
 
     size_t rwnum = meta.full_chunk_num;
@@ -970,7 +970,7 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
     pthread_t tid;
     pthread_create(&tid, NULL, io_thread, &ioctx);
 
-    for (size_t i = 0; i < rwnum; ++i) {
+    for (size_t k = 0; k < rwnum; ++k) {
         Chunk *chunk = SpscQueue_pop(&qin);
         repair(chunk, bad_disks[0], bad_disks[1]);
         SpscQueue_push(&qout, chunk);
