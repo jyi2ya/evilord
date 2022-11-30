@@ -1,14 +1,19 @@
 #ifndef MMIO_H_
 #define MMIO_H_
 
+#include <stdio.h>
 #include <stddef.h>
 
 typedef struct {
     int fd;
     size_t size;
     size_t pos;
-    void *buf;
+    union {
+        void *buf;
+        FILE *fp;
+    };
 } MMIO;
+
 
 void mmrd_open(MMIO *x, const char *fname, size_t size);
 void mmrd_close(MMIO *x);
