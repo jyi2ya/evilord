@@ -280,6 +280,9 @@ void cook_chunk(Chunk *chunk) {
 #endif
 }
 
+void repair_nop(UNUSED_PARAM Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
+}
+
 void repair_2bad_case1(Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
     /* i == m && j == m + 1 */
     assert(chunk != NULL);
@@ -403,6 +406,8 @@ void repair_2bad_case4(Chunk *chunk, int i, int j) {
 typedef void (*Writer)(Chunk *, MMIO *, int *);
 
 typedef struct {
+    void (*repair)(Chunk *, int, int);
+    int i, j;
     Writer writer;
     SpscQueue *queue;
     MMIO *files;
@@ -413,6 +418,8 @@ typedef struct {
 typedef void (*Reader)(Chunk *, MMIO *);
 
 typedef struct {
+    void (*repair)(Chunk *, int, int);
+    int i, j;
     Reader reader;
     SpscQueue *queue;
     MMIO *files;
@@ -427,6 +434,7 @@ void *read_thread(void *data) {
         Chunk *chunk = chunk_new(readctx->p);
         assert(chunk != NULL);
         readctx->reader(chunk, readctx->files);
+        readctx->repair(chunk, readctx->i, readctx->j);
         SpscQueue_push(readctx->queue, chunk);
         readctx->times -= 1;
     }
@@ -439,6 +447,7 @@ void *write_thread(void *data) {
     while (writectx->times != 0) {
         Chunk *chunk = SpscQueue_pop(writectx->queue);
         assert(chunk != NULL);
+        writectx->repair(chunk, writectx->i, writectx->j);
         writectx->writer(chunk, writectx->files, writectx->option);
         free(chunk);
         writectx->times -= 1;
@@ -718,30 +727,37 @@ void read_file(char *filename, const char *save_as) {
         repair = repair_2bad_case4;
     }
 
-    SpscQueue qout = SpscQueue_new(QUEUESIZE);
+    SpscQueue queue = SpscQueue_new(QUEUESIZE);
+
     WriteCtx writectx = {
+        .repair = repair,
+        .i = i, .j = j,
         .files = out,
         .option = NULL,
-        .queue = &qout,
+        .queue = &queue,
         .writer = write_raw_chunk,
         .times = meta.full_chunk_num,
     };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, write_thread, &writectx);
+    ReadCtx readctx = {
+        .repair = repair_nop,
+        .i = i, .j = j,
+        .files = in,
+        .queue = &queue,
+        .reader = read_cooked_chunk,
+        .times = meta.full_chunk_num,
+        .p = p,
+    };
 
-    size_t rwnum = meta.full_chunk_num;
-    /* 从磁盘中读取 chunk，并将原始文件的数据写入到 save_as 所对应的文件中 */
-    for (size_t k = 0; k < rwnum; ++k) {
-        Chunk *chunk = chunk_new(p);
-        read_cooked_chunk(chunk, in);
-        repair(chunk, bad_disks[0], bad_disks[1]);
-        SpscQueue_push(&qout, chunk);
-    }
-    pthread_join(tid, NULL);
+    pthread_t rd, wr;
+    pthread_create(&rd, NULL, read_thread, &readctx);
+    pthread_create(&wr, NULL, write_thread, &writectx);
+
+    pthread_join(rd, NULL);
+    pthread_join(wr, NULL);
 
 #ifdef PERFCNT
-    SpscQueue_perf(&qout, "qout");
+    SpscQueue_perf(&queue, "queue");
 #endif
 
     if (meta.last_chunk_data_size != 0) {
@@ -752,7 +768,7 @@ void read_file(char *filename, const char *save_as) {
         free(chunk);
     }
 
-    SpscQueue_drop(&qout);
+    SpscQueue_drop(&queue);
 }
 
 /**
@@ -788,32 +804,37 @@ void write_file(char *file_to_read, int p) {
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
-    SpscQueue qout = SpscQueue_new(QUEUESIZE);
+    SpscQueue queue = SpscQueue_new(QUEUESIZE);
     WriteCtx writectx = {
+        .repair = repair_2bad_case1,
+        .i = p, .j = p + 1,
         .files = out,
         .option = NULL,
-        .queue = &qout,
+        .queue = &queue,
         .writer = write_cooked_chunk,
         .times = rwnum,
     };
+    ReadCtx readctx = {
+        .repair = repair_nop,
+        .i = p, .j = p + 1,
+        .files = in,
+        .queue = &queue,
+        .reader = read_raw_chunk,
+        .times = rwnum,
+        .p = p,
+    };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, write_thread, &writectx);
-
-    for (size_t i = 0; i < rwnum; ++i) {
-        Chunk *chunk = chunk_new(p);
-        read_raw_chunk(chunk, in);
-        cook_chunk_r1(chunk);
-        cook_chunk_r2(chunk);
-        SpscQueue_push(&qout, chunk);
-    }
-    pthread_join(tid, NULL);
+    pthread_t rd, wr;
+    pthread_create(&rd, NULL, read_thread, &readctx);
+    pthread_create(&wr, NULL, write_thread, &writectx);
+    pthread_join(rd, NULL);
+    pthread_join(wr, NULL);
 
 #ifdef PERFCNT
-    SpscQueue_perf(&qout, "qout");
+    SpscQueue_perf(&queue, "queue");
 #endif
 
-    SpscQueue_drop(&qout);
+    SpscQueue_drop(&queue);
 }
 
 /**
@@ -902,31 +923,38 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
-    SpscQueue qin = SpscQueue_new(QUEUESIZE);
-    ReadCtx readctx = {
-        .files = in,
-        .queue = &qin,
-        .p = p,
-        .reader = read_cooked_chunk,
+    SpscQueue queue = SpscQueue_new(QUEUESIZE);
+    WriteCtx writectx = {
+        .repair = repair,
+        .i = i, .j = j,
+        .files = out,
+        .option = bad_disks,
+        .queue = &queue,
+        .writer = write_cooked_chunk_to_bad_disk,
         .times = rwnum,
     };
+    ReadCtx readctx = {
+        .repair = repair_nop,
+        .i = i, .j = j,
+        .files = in,
+        .queue = &queue,
+        .reader = read_cooked_chunk,
+        .times = rwnum,
+        .p = p,
+    };
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, read_thread, &readctx);
 
-    for (size_t k = 0; k < rwnum; ++k) {
-        Chunk *chunk = SpscQueue_pop(&qin);
-        repair(chunk, bad_disks[0], bad_disks[1]);
-        write_cooked_chunk_to_bad_disk(chunk, out, bad_disks);
-        free(chunk);
-    }
-    pthread_join(tid, NULL);
+    pthread_t rd, wr;
+    pthread_create(&rd, NULL, read_thread, &readctx);
+    pthread_create(&wr, NULL, write_thread, &writectx);
+    pthread_join(rd, NULL);
+    pthread_join(wr, NULL);
 
 #ifdef PERFCNT
-    SpscQueue_perf(&qin, "qin ");
+    SpscQueue_perf(&queue, "queue");
 #endif
 
-    SpscQueue_drop(&qin);
+    SpscQueue_drop(&queue);
 }
 
 /**
