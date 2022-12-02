@@ -20,10 +20,12 @@ typedef struct {
     volatile unsigned int out;
     unsigned int mask;
     ItemType * volatile data;
+#ifdef PERFCNT
     struct {
         size_t wait;
         size_t cnt;
     } push, pop;
+#endif
 } SpscQueue;
 
 SpscQueue SpscQueue_new(unsigned int size);

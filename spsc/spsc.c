@@ -10,6 +10,7 @@ static unsigned int roundup_pow_two(unsigned int size) {
 
 SpscQueue SpscQueue_new(unsigned int size) {
     return (SpscQueue) {
+#ifdef PERFCNT
         .push = {
             .wait = 0,
             .cnt = 0,
@@ -18,6 +19,7 @@ SpscQueue SpscQueue_new(unsigned int size) {
             .wait = 0,
             .cnt = 0,
         },
+#endif
         .data = malloc(sizeof(ItemType) * roundup_pow_two(size)),
         .in = 0,
         .out = 0,
@@ -28,6 +30,7 @@ SpscQueue SpscQueue_new(unsigned int size) {
 void SpscQueue_drop(SpscQueue *self) {
     free(self->data);
     *self = (SpscQueue) {
+#ifdef PERFCNT
         .push = {
             .wait = 0,
             .cnt = 0,
@@ -36,6 +39,7 @@ void SpscQueue_drop(SpscQueue *self) {
             .wait = 0,
             .cnt = 0,
         },
+#endif
         .data = NULL,
         .in = 0,
         .out = 0,
@@ -52,6 +56,7 @@ int SpscQueue_full(SpscQueue *self) {
 }
 
 void SpscQueue_push(SpscQueue *self, ItemType data) {
+#ifdef PERFCNT
     // FIXME: barrier: magic
     write_barrier();
     if (SpscQueue_full(self)) {
@@ -59,6 +64,7 @@ void SpscQueue_push(SpscQueue *self, ItemType data) {
     }
     self->push.cnt += 1;
     write_barrier();
+#endif
 
     while (SpscQueue_full(self))
         ;
@@ -69,6 +75,7 @@ void SpscQueue_push(SpscQueue *self, ItemType data) {
 }
 
 ItemType SpscQueue_pop(SpscQueue *self) {
+#ifdef PERFCNT
     // FIXME: barrier: magic
     write_barrier();
     if (SpscQueue_empty(self)) {
@@ -76,6 +83,7 @@ ItemType SpscQueue_pop(SpscQueue *self) {
     }
     self->pop.cnt += 1;
     write_barrier();
+#endif
 
     while (SpscQueue_empty(self))
         ;
@@ -86,9 +94,11 @@ ItemType SpscQueue_pop(SpscQueue *self) {
     return res;
 }
 
+#ifdef PERFCNT
 void SpscQueue_perf(SpscQueue *self, const char *prompt) {
     fprintf(stderr, "%s: pop block %zu%%(%zu/%zu), push block %zu%%(%zu/%zu)\n",
             prompt,
             self->pop.wait * 100 / self->pop.cnt, self->pop.wait, self->pop.cnt,
             self->push.wait * 100 / self->push.cnt, self->push.wait, self->push.cnt);
 }
+#endif
