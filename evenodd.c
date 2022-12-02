@@ -113,6 +113,7 @@ typedef uint64_t Packet;
  */
 typedef struct {
     int p;
+    int ok;
     Packet data[];
 } Chunk;
 
@@ -280,9 +281,6 @@ void cook_chunk(Chunk *chunk) {
 #endif
 }
 
-void repair_nop(UNUSED_PARAM Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
-}
-
 void repair_2bad_case1(Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
     /* i == m && j == m + 1 */
     assert(chunk != NULL);
@@ -405,7 +403,9 @@ void repair_2bad_case4(Chunk *chunk, int i, int j) {
 
 typedef void (*Writer)(Chunk *, MMIO *, int *);
 
-typedef struct {
+struct ReadCtx;
+
+typedef struct WriteCtx {
     void (*repair)(Chunk *, int, int);
     int i, j;
     Writer writer;
@@ -413,11 +413,12 @@ typedef struct {
     MMIO *files;
     int *option;
     int times;
+    struct ReadCtx *peer;
 } WriteCtx;
 
 typedef void (*Reader)(Chunk *, MMIO *);
 
-typedef struct {
+typedef struct ReadCtx {
     void (*repair)(Chunk *, int, int);
     int i, j;
     Reader reader;
@@ -425,16 +426,29 @@ typedef struct {
     MMIO *files;
     int times;
     int p;
+    struct WriteCtx *peer;
 } ReadCtx;
 
 void *read_thread(void *data) {
     ReadCtx *readctx = (ReadCtx *)data;
     assert(readctx != NULL);
+    size_t threshold_max = readctx->queue->mask + 1;
+    size_t threshold = threshold_max / 2;
     while (readctx->times != 0) {
+        if (SpscQueue_full(readctx->queue)) {
+            threshold /= 2;
+        } else if (SpscQueue_empty(readctx->queue)) {
+            threshold += (threshold_max - threshold) / 2;
+        }
+
         Chunk *chunk = chunk_new(readctx->p);
         assert(chunk != NULL);
         readctx->reader(chunk, readctx->files);
-        readctx->repair(chunk, readctx->i, readctx->j);
+        chunk->ok = 0;
+        if (SpscQueue_size(readctx->queue) > threshold) {
+            readctx->repair(chunk, readctx->i, readctx->j);
+            chunk->ok = 1;
+        }
         SpscQueue_push(readctx->queue, chunk);
         readctx->times -= 1;
     }
@@ -447,7 +461,10 @@ void *write_thread(void *data) {
     while (writectx->times != 0) {
         Chunk *chunk = SpscQueue_pop(writectx->queue);
         assert(chunk != NULL);
-        writectx->repair(chunk, writectx->i, writectx->j);
+        if (!chunk->ok) {
+            writectx->repair(chunk, writectx->i, writectx->j);
+            chunk->ok = 1;
+        }
         writectx->writer(chunk, writectx->files, writectx->option);
         free(chunk);
         writectx->times -= 1;
@@ -740,7 +757,7 @@ void read_file(char *filename, const char *save_as) {
     };
 
     ReadCtx readctx = {
-        .repair = repair_nop,
+        .repair = repair,
         .i = i, .j = j,
         .files = in,
         .queue = &queue,
@@ -748,6 +765,9 @@ void read_file(char *filename, const char *save_as) {
         .times = meta.full_chunk_num,
         .p = p,
     };
+
+    writectx.peer = &readctx;
+    readctx.peer = &writectx;
 
     pthread_t rd, wr;
     pthread_create(&rd, NULL, read_thread, &readctx);
@@ -815,7 +835,7 @@ void write_file(char *file_to_read, int p) {
         .times = rwnum,
     };
     ReadCtx readctx = {
-        .repair = repair_nop,
+        .repair = repair_2bad_case1,
         .i = p, .j = p + 1,
         .files = in,
         .queue = &queue,
@@ -823,6 +843,9 @@ void write_file(char *file_to_read, int p) {
         .times = rwnum,
         .p = p,
     };
+
+    writectx.peer = &readctx;
+    readctx.peer = &writectx;
 
     pthread_t rd, wr;
     pthread_create(&rd, NULL, read_thread, &readctx);
@@ -934,7 +957,7 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
         .times = rwnum,
     };
     ReadCtx readctx = {
-        .repair = repair_nop,
+        .repair = repair,
         .i = i, .j = j,
         .files = in,
         .queue = &queue,
@@ -943,6 +966,8 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
         .p = p,
     };
 
+    writectx.peer = &readctx;
+    readctx.peer = &writectx;
 
     pthread_t rd, wr;
     pthread_create(&rd, NULL, read_thread, &readctx);

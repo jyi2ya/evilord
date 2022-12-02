@@ -47,14 +47,6 @@ void SpscQueue_drop(SpscQueue *self) {
     };
 }
 
-int SpscQueue_empty(SpscQueue *self) {
-    return self->out == self->in;
-}
-
-int SpscQueue_full(SpscQueue *self) {
-    return self->in - self->out == self->mask + 1;
-}
-
 void SpscQueue_push(SpscQueue *self, ItemType data) {
 #ifdef PERFCNT
     // FIXME: barrier: magic

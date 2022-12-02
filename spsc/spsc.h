@@ -40,4 +40,12 @@ int SpscQueue_full(SpscQueue *self);
 
 ItemType SpscQueue_pop(SpscQueue *self);
 
+size_t SpscQueue_size(SpscQueue *self);
+
 void SpscQueue_perf(SpscQueue *self, const char *prompt);
+
+#define SpscQueue_empty(self) ((self)->out == (self)->in)
+
+#define SpscQueue_full(self) ((self)->in - (self)->out == (self)->mask + 1)
+
+#define SpscQueue_size(self) ((self)->in - (self)->out)
