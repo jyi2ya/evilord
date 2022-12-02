@@ -41,13 +41,6 @@ void panic(void) {
     abort(); \
 } while (0)
 
-typedef enum {
-    Success = 0,
-    ETooManyCorruptions,
-    EUnimplemented,
-    ECheckFail,
-} Error;
-
 /**
  * Packet - 进行运算的单位数据
  *
@@ -154,6 +147,7 @@ size_t chunk_data_size(int p) {
  */
 Chunk *chunk_new(int p) {
     Chunk *result = (Chunk *)malloc(chunk_size(p));
+    assert(result != NULL);
     return chunk_init(result, p);
 }
 
@@ -187,7 +181,9 @@ Chunk *chunk_new(int p) {
  */
 #define M(x) (((x) + m) % m)
 
-Error check_chunk(Chunk *chunk) {
+void check_chunk(Chunk *chunk) {
+    assert(chunk != NULL);
+
     int m = chunk->p;
 
     /* 检查对角线是否合法 */
@@ -203,7 +199,7 @@ Error check_chunk(Chunk *chunk) {
         }
         if (S1 != S) {
             fprintf(stderr, "check chunk: diagonal %d/%d broken\n", i, m - 1);
-            return ECheckFail;
+            return;
         }
     }
 
@@ -215,10 +211,9 @@ Error check_chunk(Chunk *chunk) {
         }
         if (S != 0) {
             fprintf(stderr, "check chunk: row %d/%d broken\n", i, m - 1);
-            return ECheckFail;
+            return;
         }
     }
-    return Success;
 }
 
 /**
@@ -239,7 +234,8 @@ Error check_chunk(Chunk *chunk) {
 /**
  * cook_chunk_r1() - 计算第一列校验值，即原始数据每行的异或值。
  */
-Error cook_chunk_r1(Chunk *chunk) {
+void cook_chunk_r1(Chunk *chunk) {
+    assert(chunk != NULL);
     int m = chunk->p;
     for (int l = 0; l <= m - 2; ++l)
         PZERO(AT(l, m));
@@ -248,13 +244,13 @@ Error cook_chunk_r1(Chunk *chunk) {
             PXOR(AT(l, m), AT(l, t));
         }
     }
-    return Success;
 }
 
 /**
  * cook_chunk_r2() - 计算第二列校验值，即各种对角线神奇魔法算出来的值。
  */
-Error cook_chunk_r2(Chunk *chunk) {
+void cook_chunk_r2(Chunk *chunk) {
+    assert(chunk != NULL);
     Packet S;
     PZERO(S);
     int m = chunk->p;
@@ -270,30 +266,31 @@ Error cook_chunk_r2(Chunk *chunk) {
             PXOR(AT(l, m + 1), ATR(l - t, t));
         }
     }
-    return Success;
 }
 
 /**
  * cook_chunk() - 计算校验值。
  */
-inline Error cook_chunk(Chunk *chunk) {
+void cook_chunk(Chunk *chunk) {
+    assert(chunk != NULL);
     cook_chunk_r1(chunk);
     cook_chunk_r2(chunk);
-#ifndef NDEBUG
+#ifdef CHECKCHUNK
     check_chunk(chunk);
 #endif
-    return Success;
 }
 
-Error repair_2bad_case1(Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
+void repair_2bad_case1(Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
     /* i == m && j == m + 1 */
+    assert(chunk != NULL);
     cook_chunk_r1(chunk);
     cook_chunk_r2(chunk);
-    return Success;
 }
 
-Error repair_2bad_case2(Chunk *chunk, int i, UNUSED_PARAM int j) {
+void repair_2bad_case2(Chunk *chunk, int i, UNUSED_PARAM int j) {
     /* i < m && j == m */
+    assert(chunk != NULL);
+    assert(i < chunk->p);
     int m = chunk->p;
     Packet S;
     int ref_diagonal = M(i - 1);
@@ -328,11 +325,12 @@ Error repair_2bad_case2(Chunk *chunk, int i, UNUSED_PARAM int j) {
             PXOR(AT(k, i), ATR(M(k + i - l), l));
     }
     cook_chunk_r1(chunk);
-    return Success;
 }
 
-Error repair_2bad_case3(Chunk *chunk, int i, UNUSED_PARAM int j) {
+void repair_2bad_case3(Chunk *chunk, int i, UNUSED_PARAM int j) {
     /* i < m && j == m + 1 */
+    assert(chunk != NULL);
+    assert(i < chunk->p);
     int m = chunk->p;
     for (int k = 0; k < m - 1; ++k)
         PZERO(AT(k, i));
@@ -347,10 +345,12 @@ Error repair_2bad_case3(Chunk *chunk, int i, UNUSED_PARAM int j) {
         }
     }
     cook_chunk_r2(chunk);
-    return Success;
 }
 
-Error repair_2bad_case4(Chunk *chunk, int i, int j) {
+void repair_2bad_case4(Chunk *chunk, int i, int j) {
+    assert(chunk != NULL);
+    assert(i < chunk->p);
+    assert(j < chunk->p);
     int m = chunk->p;
     /* 损坏的是两块原始数据磁盘 */
     Packet S;
@@ -398,10 +398,9 @@ Error repair_2bad_case4(Chunk *chunk, int i, int j) {
         PXOR(AT(s, i), AT(s, j));
         s += m * (s < step);
     }
-    return Success;
 }
 
-typedef Error (*Writer)(Chunk *, MMIO *, int *);
+typedef void (*Writer)(Chunk *, MMIO *, int *);
 
 typedef struct {
     Writer writer;
@@ -411,7 +410,7 @@ typedef struct {
     int times;
 } WriteCtx;
 
-typedef Error (*Reader)(Chunk *, MMIO *);
+typedef void (*Reader)(Chunk *, MMIO *);
 
 typedef struct {
     Reader reader;
@@ -423,8 +422,10 @@ typedef struct {
 
 void *read_thread(void *data) {
     ReadCtx *readctx = (ReadCtx *)data;
+    assert(readctx != NULL);
     while (readctx->times != 0) {
         Chunk *chunk = chunk_new(readctx->p);
+        assert(chunk != NULL);
         readctx->reader(chunk, readctx->files);
         SpscQueue_push(readctx->queue, chunk);
         readctx->times -= 1;
@@ -434,8 +435,10 @@ void *read_thread(void *data) {
 
 void *write_thread(void *data) {
     WriteCtx *writectx = (WriteCtx *)data;
+    assert(writectx != NULL);
     while (writectx->times != 0) {
         Chunk *chunk = SpscQueue_pop(writectx->queue);
+        assert(chunk != NULL);
         writectx->writer(chunk, writectx->files, writectx->option);
         free(chunk);
         writectx->times -= 1;
@@ -450,18 +453,18 @@ void *write_thread(void *data) {
  * 数据。此函数用于处理原始文件的最后一个 chunk，仅写入有效数据的部分。有效数
  * 据的大小由调用者根据其他信息计算。
  */
-Error write_raw_chunk_limited(Chunk *chunk, MMIO file[1], int limit) {
+void write_raw_chunk_limited(Chunk *chunk, MMIO file[1], int limit) {
+    assert(chunk != NULL);
     mmwrite(chunk->data, limit, &file[0]);
-    return Success;
 }
 
 /**
  * write_raw_chunk() - 将 raw chunk 写入文件
  */
-Error write_raw_chunk(Chunk *chunk, MMIO file[1], UNUSED_PARAM int _unused[1]) {
+void write_raw_chunk(Chunk *chunk, MMIO file[1], UNUSED_PARAM int _unused[1]) {
+    assert(chunk != NULL);
     size_t num = chunk->p * (chunk->p - 1);
     mmwrite(chunk->data, sizeof(Packet) * num, &file[0]);
-    return Success;
 }
 
 /**
@@ -472,11 +475,11 @@ Error write_raw_chunk(Chunk *chunk, MMIO file[1], UNUSED_PARAM int _unused[1]) {
  * 原始文件大小经常不能被 p * (p-1) 整除，导致最后一个 chunk 通常不能读取到足
  * 够的数据。此处我们约定，未完全填满的 chunk 其余字节皆为 0。
  */
-Error read_raw_chunk(Chunk *chunk, MMIO *file) {
+void read_raw_chunk(Chunk *chunk, MMIO *file) {
+    assert(chunk != NULL);
     size_t num = chunk->p * (chunk->p - 1);
     size_t ok = mmread(chunk->data, sizeof(Packet) * num, &file[0]);
     memset((void *)chunk->data + ok, 0, (chunk->p - 1) * (chunk->p + 2) * sizeof(Packet) - ok);
-    return Success;
 }
 
 /**
@@ -487,18 +490,18 @@ Error read_raw_chunk(Chunk *chunk, MMIO *file) {
  *
  * 调用者应保证 chunk 合法，以及 files[] 数组及其内文件指针有效。
  */
-Error write_cooked_chunk(Chunk *chunk, MMIO *files, UNUSED_PARAM int _unused[1]) {
+void write_cooked_chunk(Chunk *chunk, MMIO *files, UNUSED_PARAM int _unused[1]) {
+    assert(chunk != NULL);
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
-#ifndef NDEBUG
+#ifdef CHECKCHUNK
     check_chunk(chunk);
 #endif
     for (int i = 0; i < disk_num; ++i) {
         mmwrite(data, sizeof(Packet) * items_per_disk, &files[i]);
         data += items_per_disk;
     }
-    return Success;
 }
 
 /**
@@ -512,10 +515,11 @@ Error write_cooked_chunk(Chunk *chunk, MMIO *files, UNUSED_PARAM int _unused[1])
  *
  * 用于将修复后的 chunk 写入坏掉的磁盘中。
  */
-Error write_cooked_chunk_to_bad_disk(Chunk *chunk, MMIO bad_disk_fp[2], int bad_disks[2]) {
+void write_cooked_chunk_to_bad_disk(Chunk *chunk, MMIO bad_disk_fp[2], int bad_disks[2]) {
+    assert(chunk != NULL);
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
-#ifndef NDEBUG
+#ifdef CHECKCHUNK
     check_chunk(chunk);
 #endif
     for (int i = 0; i < 2; ++i) {
@@ -523,7 +527,6 @@ Error write_cooked_chunk_to_bad_disk(Chunk *chunk, MMIO bad_disk_fp[2], int bad_
             mmwrite(data + items_per_disk * bad_disks[i], sizeof(Packet) * items_per_disk, &bad_disk_fp[i]);
         }
     }
-    return Success;
 }
 
 /**
@@ -535,7 +538,8 @@ Error write_cooked_chunk_to_bad_disk(Chunk *chunk, MMIO bad_disk_fp[2], int bad_
  *
  * 该函数并不会将修复的结果写回到磁盘中，且对读取到的 chunk 不合法的情况不做处理。
  */
-Error read_cooked_chunk(Chunk *chunk, MMIO files[]) {
+void read_cooked_chunk(Chunk *chunk, MMIO files[]) {
+    assert(chunk != NULL);
     int disk_num = chunk->p + 2;
     int items_per_disk = chunk->p - 1;
     Packet *data = chunk->data;
@@ -544,21 +548,11 @@ Error read_cooked_chunk(Chunk *chunk, MMIO files[]) {
         if (files[i].fd == -1) {
             memset(data, 0, items_per_disk * sizeof(Packet));
         } else {
-#ifndef NDEBUG
-            size_t ok =
-#endif
-                mmread(data, sizeof(Packet) * items_per_disk, &files[i]);
-#ifndef NDEBUG
-            if (ok < items_per_disk * sizeof(Packet)) {
-                fprintf(stderr, "bad read at line %d, read %zu bytes\n", __LINE__, ok);
-                abort();
-            }
-#endif
+            size_t ok = mmread(data, sizeof(Packet) * items_per_disk, &files[i]);
+            assert(ok == items_per_disk * sizeof(Packet));
         }
         data += items_per_disk;
     }
-
-    return Success;
 }
 
 /**
@@ -589,6 +583,7 @@ typedef struct {
  */
 void skip_metadata(MMIO *file) {
     Metadata data;
+    assert(file != NULL);
     mmread(&data, sizeof(data), file);
 }
 
@@ -596,6 +591,7 @@ void skip_metadata(MMIO *file) {
  * write_metadata() - 将 Metadata 写入文件
  */
 void write_metadata(Metadata data, MMIO *file) {
+    assert(file != NULL);
     mmwrite(&data, sizeof(data), file);
 }
 
@@ -607,6 +603,7 @@ void write_metadata(Metadata data, MMIO *file) {
 Metadata get_raw_file_metadata(const char *filename, int p) {
     Metadata result;
     FILE *fp = fopen(filename, "rb");
+    assert(fp != NULL);
     result.p = p;
     fseek(fp, 0, SEEK_END);
     result.size = ftell(fp);
@@ -623,6 +620,7 @@ Metadata get_cooked_file_metadata(const char *filename) {
     Metadata result;
     int success = 0;
 
+    assert(filename != NULL);
     /* 尝试磁盘 0 1 和 2 ，从第一个成功打开的磁盘中读取文件的 Metadata */
     for (int i = 0; i < 3; ++i) {
         char path[PATH_MAX];
@@ -643,6 +641,7 @@ Metadata get_cooked_file_metadata(const char *filename) {
 }
 
 size_t disk_file_size(Metadata *x) {
+    assert(x != NULL);
     size_t size = sizeof(Metadata);
     size += (x->p - 1) * sizeof(Packet) * x->full_chunk_num;
     if (x->last_chunk_data_size != 0)
@@ -658,6 +657,9 @@ void read_file(char *filename, const char *save_as) {
     MMIO in[PMAX + 2]; // FIXME: dirty hack
     int bad_disks[2] = { -1, -1 };
     int bad_disk_num = 0;
+
+    assert(filename != NULL);
+    assert(save_as != NULL);
 
     simple_hash(filename);
 
@@ -701,7 +703,7 @@ void read_file(char *filename, const char *save_as) {
         }
     }
 
-    Error (*repair)(Chunk *, int, int);
+    void (*repair)(Chunk *, int, int);
 
     int i = bad_disks[0], j = bad_disks[1];
     if (i == p && j == p + 1) {
@@ -759,6 +761,10 @@ void read_file(char *filename, const char *save_as) {
 void write_file(char *file_to_read, int p) {
     MMIO in[1];
     MMIO out[PMAX + 2]; // FIXME: dirty hack
+
+    assert(file_to_read != NULL);
+    assert(p >= 3);
+    assert(p <= 100);
 
     /* 获取文件的 Metadata */
     Metadata meta = get_raw_file_metadata(file_to_read, p);
@@ -819,6 +825,8 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
     char path[PATH_MAX];
     int bad_disks[2] = { bad_disks_[0], bad_disks_[1] };
 
+    assert(fname != NULL);
+
     /* 从 raid 中读取文件的 Metadata */
     Metadata meta = get_cooked_file_metadata(fname);
 
@@ -853,8 +861,9 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
         j = bad_disks[1];
     }
 
-    Error (*repair)(Chunk *, int, int);
+    void (*repair)(Chunk *, int, int);
 
+    assert(i < j);
     if (i == p && j == p + 1) {
         repair = repair_2bad_case1;
         /* 损坏的是两个保存校验值的磁盘 */
@@ -940,19 +949,10 @@ int main(int argc, char** argv) {
 
     char* op = argv[1];
     if (strcmp(op, "write") == 0) {
-#ifndef NDEBUG
-        fprintf(stderr, "write %s %s\n", argv[2], argv[3]);
-#endif
         write_file(argv[2], atoi(argv[3]));
     } else if (strcmp(op, "read") == 0) {
-#ifndef NDEBUG
-        fprintf(stderr, "read %s %s\n", argv[2], argv[3]);
-#endif
         read_file(argv[2], argv[3]);
     } else if (strcmp(op, "repair") == 0) {
-#ifndef NDEBUG
-        fprintf(stderr, "repair %s %s\n", argv[2], "DAxZE");
-#endif
         int bad_disk_num = atoi(argv[2]);
         int bad_disks[2] = { -1, -1 };
 
@@ -960,6 +960,8 @@ int main(int argc, char** argv) {
             puts("Too many corruptions!");
             exit(0);
         }
+
+        assert(0 <= bad_disk_num && bad_disk_num <= 2);
 
         for (int i = 0; i < bad_disk_num; ++i) {
             bad_disks[i] = atoi(argv[i + 3]);
@@ -976,7 +978,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        DIR *dir;
+        DIR *dir = NULL;
         for (int i = 0; i < 3; ++i) {
             char path[PATH_MAX];
             sprintf(path, "disk_%d", i);
@@ -985,6 +987,7 @@ int main(int argc, char** argv) {
                 break;
             }
         }
+        assert(dir != NULL);
 
         struct dirent *entry;
         while ((entry = readdir(dir)) != NULL) {

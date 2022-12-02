@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include "mmio.h"
 #include <string.h>
+#include <assert.h>
 
 #define MMIO_RDMAP_OPTION (MAP_NORESERVE | MAP_PRIVATE)
 #define MMIO_RDMAP_MADVICE (MADV_SEQUENTIAL | MADV_WILLNEED)
@@ -27,6 +28,7 @@ void mmrd_open(MMIO *x, const char *fname, size_t size) {
 }
 
 void mmrd_close(MMIO *x) {
+    assert(x->fd != -1);
     munmap(x->buf, x->size);
     close(x->fd);
     x->fd = -1;
@@ -52,6 +54,7 @@ void mmwr_open(MMIO *x, const char *fname, size_t size) {
 }
 
 void mmwr_close(MMIO *x) {
+    assert(x->fd != -1);
     munmap(x->buf, x->size);
     close(x->fd);
     x->fd = -1;
