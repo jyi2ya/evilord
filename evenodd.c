@@ -409,7 +409,8 @@ typedef struct WriteCtx {
     void (*repair)(Chunk *, int, int);
     int i, j;
     Writer writer;
-    SpscQueue *queue;
+    SpscQueue *dirty_chunks;
+    SpscQueue *clean_chunks;
     MMIO *files;
     int *option;
     int times;
@@ -422,34 +423,26 @@ typedef struct ReadCtx {
     void (*repair)(Chunk *, int, int);
     int i, j;
     Reader reader;
-    SpscQueue *queue;
+    SpscQueue *dirty_chunks;
+    SpscQueue *clean_chunks;
     MMIO *files;
     int times;
-    int p;
     struct WriteCtx *peer;
 } ReadCtx;
 
 void *read_thread(void *data) {
     ReadCtx *readctx = (ReadCtx *)data;
-    assert(readctx != NULL);
-    size_t threshold_max = readctx->queue->mask + 1;
-    size_t threshold = threshold_max / 2;
+    size_t threshold = (readctx->dirty_chunks->mask + 1) / 2;
     while (readctx->times != 0) {
-        if (SpscQueue_full(readctx->queue)) {
-            threshold /= 2;
-        } else if (SpscQueue_empty(readctx->queue)) {
-            threshold += (threshold_max - threshold) / 2;
-        }
-
-        Chunk *chunk = chunk_new(readctx->p);
-        assert(chunk != NULL);
+        Chunk *chunk = SpscQueue_pop(readctx->clean_chunks);
         readctx->reader(chunk, readctx->files);
-        chunk->ok = 0;
-        if (SpscQueue_size(readctx->queue) > threshold) {
+        if (SpscQueue_size(readctx->dirty_chunks) > threshold) {
             readctx->repair(chunk, readctx->i, readctx->j);
             chunk->ok = 1;
+        } else {
+            chunk->ok = 0;
         }
-        SpscQueue_push(readctx->queue, chunk);
+        SpscQueue_push(readctx->dirty_chunks, chunk);
         readctx->times -= 1;
     }
     pthread_exit(NULL);
@@ -457,16 +450,13 @@ void *read_thread(void *data) {
 
 void *write_thread(void *data) {
     WriteCtx *writectx = (WriteCtx *)data;
-    assert(writectx != NULL);
     while (writectx->times != 0) {
-        Chunk *chunk = SpscQueue_pop(writectx->queue);
-        assert(chunk != NULL);
+        Chunk *chunk = SpscQueue_pop(writectx->dirty_chunks);
         if (!chunk->ok) {
             writectx->repair(chunk, writectx->i, writectx->j);
-            chunk->ok = 1;
         }
         writectx->writer(chunk, writectx->files, writectx->option);
-        free(chunk);
+        SpscQueue_push(writectx->clean_chunks, chunk);
         writectx->times -= 1;
     }
     pthread_exit(NULL);
@@ -675,6 +665,16 @@ size_t disk_file_size(Metadata *x) {
     return size;
 }
 
+void push_chunks_into_queue(SpscQueue *queue, Chunk *chunks, int p) {
+    size_t size = chunk_size(p);
+    void *c = chunks;
+    for (size_t k = 0; k < queue->mask + 1; ++k) {
+        chunk_init(c, p);
+        SpscQueue_push(queue, c);
+        c += size;
+    }
+}
+
 /**
  * read_file() - 题目规定的 read 操作实现
  */
@@ -744,14 +744,18 @@ void read_file(char *filename, const char *save_as) {
         repair = repair_2bad_case4;
     }
 
-    SpscQueue queue = SpscQueue_new(QUEUESIZE);
+    SpscQueue dirty_chunks = SpscQueue_new(QUEUESIZE);
+    SpscQueue clean_chunks = SpscQueue_new(QUEUESIZE);
+    Chunk *chunks = calloc(clean_chunks.mask + 1, chunk_size(p));
+    push_chunks_into_queue(&clean_chunks, chunks, p);
 
     WriteCtx writectx = {
         .repair = repair,
         .i = i, .j = j,
         .files = out,
         .option = NULL,
-        .queue = &queue,
+        .dirty_chunks = &dirty_chunks,
+        .clean_chunks = &clean_chunks,
         .writer = write_raw_chunk,
         .times = meta.full_chunk_num,
     };
@@ -760,10 +764,10 @@ void read_file(char *filename, const char *save_as) {
         .repair = repair,
         .i = i, .j = j,
         .files = in,
-        .queue = &queue,
+        .dirty_chunks = &dirty_chunks,
+        .clean_chunks = &clean_chunks,
         .reader = read_cooked_chunk,
         .times = meta.full_chunk_num,
-        .p = p,
     };
 
     writectx.peer = &readctx;
@@ -777,7 +781,8 @@ void read_file(char *filename, const char *save_as) {
     pthread_join(wr, NULL);
 
 #ifdef PERFCNT
-    SpscQueue_perf(&queue, "queue");
+    SpscQueue_perf(&dirty_chunks, "dirty_chunks");
+    SpscQueue_perf(&clean_chunks, "clean_chunks");
 #endif
 
     if (meta.last_chunk_data_size != 0) {
@@ -788,7 +793,9 @@ void read_file(char *filename, const char *save_as) {
         free(chunk);
     }
 
-    SpscQueue_drop(&queue);
+    SpscQueue_drop(&dirty_chunks);
+    SpscQueue_drop(&clean_chunks);
+    free(chunks);
 }
 
 /**
@@ -800,7 +807,7 @@ void write_file(char *file_to_read, int p) {
 
     assert(file_to_read != NULL);
     assert(p >= 3);
-    assert(p <= 100);
+    assert(p <= 101);
 
     /* 获取文件的 Metadata */
     Metadata meta = get_raw_file_metadata(file_to_read, p);
@@ -824,13 +831,18 @@ void write_file(char *file_to_read, int p) {
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
-    SpscQueue queue = SpscQueue_new(QUEUESIZE);
+    SpscQueue dirty_chunks = SpscQueue_new(QUEUESIZE);
+    SpscQueue clean_chunks = SpscQueue_new(QUEUESIZE);
+    Chunk *chunks = calloc(clean_chunks.mask + 1, chunk_size(p));
+    push_chunks_into_queue(&clean_chunks, chunks, p);
+
     WriteCtx writectx = {
         .repair = repair_2bad_case1,
         .i = p, .j = p + 1,
         .files = out,
         .option = NULL,
-        .queue = &queue,
+        .dirty_chunks = &dirty_chunks,
+        .clean_chunks = &clean_chunks,
         .writer = write_cooked_chunk,
         .times = rwnum,
     };
@@ -838,10 +850,10 @@ void write_file(char *file_to_read, int p) {
         .repair = repair_2bad_case1,
         .i = p, .j = p + 1,
         .files = in,
-        .queue = &queue,
+        .dirty_chunks = &dirty_chunks,
+        .clean_chunks = &clean_chunks,
         .reader = read_raw_chunk,
         .times = rwnum,
-        .p = p,
     };
 
     writectx.peer = &readctx;
@@ -854,10 +866,13 @@ void write_file(char *file_to_read, int p) {
     pthread_join(wr, NULL);
 
 #ifdef PERFCNT
-    SpscQueue_perf(&queue, "queue");
+    SpscQueue_perf(&dirty_chunks, "dirty_chunks");
+    SpscQueue_perf(&clean_chunks, "clean_chunks");
 #endif
 
-    SpscQueue_drop(&queue);
+    SpscQueue_drop(&dirty_chunks);
+    SpscQueue_drop(&clean_chunks);
+    free(chunks);
 }
 
 /**
@@ -946,13 +961,18 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
     if (meta.last_chunk_data_size != 0)
         rwnum += 1;
 
-    SpscQueue queue = SpscQueue_new(QUEUESIZE);
+    SpscQueue dirty_chunks = SpscQueue_new(QUEUESIZE);
+    SpscQueue clean_chunks = SpscQueue_new(QUEUESIZE);
+    Chunk *chunks = calloc(clean_chunks.mask + 1, chunk_size(p));
+    push_chunks_into_queue(&clean_chunks, chunks, p);
+
     WriteCtx writectx = {
         .repair = repair,
         .i = i, .j = j,
         .files = out,
         .option = bad_disks,
-        .queue = &queue,
+        .dirty_chunks = &dirty_chunks,
+        .clean_chunks = &clean_chunks,
         .writer = write_cooked_chunk_to_bad_disk,
         .times = rwnum,
     };
@@ -960,10 +980,10 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
         .repair = repair,
         .i = i, .j = j,
         .files = in,
-        .queue = &queue,
+        .dirty_chunks = &dirty_chunks,
+        .clean_chunks = &clean_chunks,
         .reader = read_cooked_chunk,
         .times = rwnum,
-        .p = p,
     };
 
     writectx.peer = &readctx;
@@ -976,10 +996,13 @@ void repair_file(const char *fname, int bad_disk_num, int bad_disks_[2]) {
     pthread_join(wr, NULL);
 
 #ifdef PERFCNT
-    SpscQueue_perf(&queue, "queue");
+    SpscQueue_perf(&dirty_chunks, "dirty_chunks");
+    SpscQueue_perf(&clean_chunks, "clean_chunks");
 #endif
 
-    SpscQueue_drop(&queue);
+    SpscQueue_drop(&dirty_chunks);
+    SpscQueue_drop(&clean_chunks);
+    free(chunks);
 }
 
 /**
