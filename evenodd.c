@@ -238,10 +238,9 @@ void check_chunk(Chunk *chunk) {
 void cook_chunk_r1(Chunk *chunk) {
     assert(chunk != NULL);
     int m = chunk->p;
-    for (int l = 0; l <= m - 2; ++l)
+    for (int l = 0; l <= m - 2; ++l) {
         PZERO(AT(l, m));
-    for (int t = 0; t <= m - 1; ++t) {
-        for (int l = 0; l <= m - 2; ++l) {
+        for (int t = 0; t <= m - 1; ++t) {
             PXOR(AT(l, m), AT(l, t));
         }
     }
@@ -260,32 +259,40 @@ void cook_chunk_r2(Chunk *chunk) {
     for (int l = 0; l <= m - 2; ++l)
         PASGN(AT(l, m + 1), S);
     for (int t = 0; t <= m - 1; ++t) {
-        for (int l = 0; l < t; ++l) {
-            PXOR(AT(l, m + 1), ATR(m + l - t, t));
+        for (int l = 0; l < (m - 1) - t; ++l) {
+            PXOR(AT(l + t, m + 1), AT(l, t));
         }
-        for (int l = t; l <= m - 2; ++l) {
-            PXOR(AT(l, m + 1), ATR(l - t, t));
+        for (int l = m - t; l <= m - 2; ++l) {
+            PXOR(AT(l + t - m, m + 1), AT(l, t));
         }
     }
-}
-
-/**
- * cook_chunk() - 计算校验值。
- */
-void cook_chunk(Chunk *chunk) {
-    assert(chunk != NULL);
-    cook_chunk_r1(chunk);
-    cook_chunk_r2(chunk);
-#ifdef CHECKCHUNK
-    check_chunk(chunk);
-#endif
 }
 
 void repair_2bad_case1(Chunk *chunk, UNUSED_PARAM int i, UNUSED_PARAM int j) {
     /* i == m && j == m + 1 */
     assert(chunk != NULL);
-    cook_chunk_r1(chunk);
-    cook_chunk_r2(chunk);
+    Packet S;
+    PZERO(S);
+    int m = chunk->p;
+
+    for (int t = 1; t <= m - 1; ++t)
+        PXOR(S, AT(m - 1 - t, t));
+
+    for (int l = 0; l <= m - 2; ++l) {
+        PASGN(AT(l, m + 1), S);
+        PASGN(AT(l, m), AT(l, m - l - 1));
+    }
+
+    for (int t = 0; t <= m - 1; ++t) {
+        for (int l = 0; l < (m - 1) - t; ++l) {
+            PXOR(AT(l, m), AT(l, t));
+            PXOR(AT(l + t, m + 1), AT(l, t));
+        }
+        for (int l = m - t; l <= m - 2; ++l) {
+            PXOR(AT(l, m), AT(l, t));
+            PXOR(AT(l + t - m, m + 1), AT(l, t));
+        }
+    }
 }
 
 void repair_2bad_case2(Chunk *chunk, int i, UNUSED_PARAM int j) {
@@ -413,7 +420,7 @@ typedef struct WriteCtx {
     SpscQueue *clean_chunks;
     MMIO *files;
     int *option;
-    int times;
+    size_t times;
     struct ReadCtx *peer;
 } WriteCtx;
 
@@ -426,39 +433,59 @@ typedef struct ReadCtx {
     SpscQueue *dirty_chunks;
     SpscQueue *clean_chunks;
     MMIO *files;
-    int times;
+    size_t times;
     struct WriteCtx *peer;
 } ReadCtx;
 
 void *read_thread(void *data) {
     ReadCtx *readctx = (ReadCtx *)data;
     size_t threshold = (readctx->dirty_chunks->mask + 1) / 2;
+#ifdef PERFCNT
+    size_t tot = readctx->times, repaired = 0;
+#endif
     while (readctx->times != 0) {
         Chunk *chunk = SpscQueue_pop(readctx->clean_chunks);
         readctx->reader(chunk, readctx->files);
+        threshold = readctx->times < threshold * 2
+            ? readctx->times / 2 : threshold;
         if (SpscQueue_size(readctx->dirty_chunks) > threshold) {
             readctx->repair(chunk, readctx->i, readctx->j);
             chunk->ok = 1;
+#ifdef PERFCNT
+            repaired += 1;
+#endif
         } else {
             chunk->ok = 0;
         }
         SpscQueue_push(readctx->dirty_chunks, chunk);
         readctx->times -= 1;
     }
+#ifdef PERFCNT
+    fprintf(stderr, "read thread repaired chunks: %zu%%(%zu/%zu)\n", repaired * 100 / tot, repaired, tot);
+#endif
     pthread_exit(NULL);
 }
 
 void *write_thread(void *data) {
     WriteCtx *writectx = (WriteCtx *)data;
+#ifdef PERFCNT
+    size_t tot = writectx->times, repaired = 0;
+#endif
     while (writectx->times != 0) {
         Chunk *chunk = SpscQueue_pop(writectx->dirty_chunks);
         if (!chunk->ok) {
+#ifdef PERFCNT
+            repaired += 1;
+#endif
             writectx->repair(chunk, writectx->i, writectx->j);
         }
         writectx->writer(chunk, writectx->files, writectx->option);
         SpscQueue_push(writectx->clean_chunks, chunk);
         writectx->times -= 1;
     }
+#ifdef PERFCNT
+    fprintf(stderr, "write thread repaired chunks: %zu%%(%zu/%zu)\n", repaired * 100 / tot, repaired, tot);
+#endif
     pthread_exit(NULL);
 }
 
@@ -1077,4 +1104,3 @@ int main(int argc, char** argv) {
     }
     return 0;
 }
-
