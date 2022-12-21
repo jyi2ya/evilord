@@ -3,15 +3,17 @@
 
 #include <stdio.h>
 #include <stddef.h>
+#include <pthread.h>
 
 typedef struct {
     int fd;
     size_t size;
     size_t pos;
-    union {
-        void *buf;
-        FILE *fp;
-    };
+
+    void *buf;
+    FILE *fp;
+    pthread_t tid;
+    int pipefd[2];
 } MMIO;
 
 

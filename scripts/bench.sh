@@ -5,7 +5,7 @@ set -e
 exec 2>&1
 
 cd "$(dirname "$0")/.." || exit 1
-gcc -O2 -DPERFCNT -DNDEBUG -pthread -std=gnu11 -o evenodd mmio/mmio.c spsc/spsc.c evenodd.c -Wall -Wextra -Wshadow
+gcc -O2 -DPERFCNT -DNDEBUG -pthread -std=gnu11 -o evenodd mmio/mmio-pipe.c spsc/spsc.c evenodd.c chunk.c metadata.c repair.c -Wall -Wextra -Wshadow
 mkdir -p test
 cd test || exit 1
 
@@ -21,7 +21,7 @@ timeit() {
 	begin=$(date +%s)
 	eval "$*"
 	end=$(date +%s)
-	speed=$((filesize / (end - begin + 1) * 100 / 1024 / 1024 ))
+	speed=$((filesize * 100 / (end - begin + 1) / 1024 / 1024 ))
 	echo -n "$((end - begin))s "
 	echo -n "$speed" | sed 's/\(..\)$/.\1/'
 	echo -n " MB/s "
