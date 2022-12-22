@@ -11,6 +11,8 @@
 
 #define MMIO_RDMAP_FADVICE (POSIX_FADV_SEQUENTIAL | POSIX_FADV_WILLNEED)
 #define MMIO_WRMAP_FADVICE (0)
+#define PIPE_SIZE (1024 * 1024)
+#define BUF_SIZE (128 * 1024)
 
 #define min(x, y) ((x) < (y) ? (x) : (y))
 
@@ -22,7 +24,11 @@ typedef struct {
 static void *copy_file_to_pipe(void *data) {
     Context *ctx = (Context *)data;
     while (ctx->size > 0) {
-        ctx->size -= sendfile(ctx->out_fd, ctx->in_fd, NULL, ctx->size);
+        size_t bytes = sendfile(ctx->out_fd, ctx->in_fd, NULL, ctx->size);
+        ctx->size -= bytes;
+        if (bytes == 0) {
+            break;
+        }
     }
     close(ctx->in_fd);
     close(ctx->out_fd);
@@ -33,7 +39,11 @@ static void *copy_file_to_pipe(void *data) {
 static void *copy_pipe_to_file(void *data) {
     Context *ctx = (Context *)data;
     while (ctx->size > 0) {
-        ctx->size -= splice(ctx->in_fd, NULL, ctx->out_fd, NULL, ctx->size, SPLICE_F_MOVE);
+        size_t bytes = splice(ctx->in_fd, NULL, ctx->out_fd, NULL, ctx->size, SPLICE_F_MOVE | SPLICE_F_MORE);
+        ctx->size -= bytes;
+        if (bytes == 0) {
+            break;
+        }
     }
     close(ctx->in_fd);
     close(ctx->out_fd);
@@ -55,6 +65,7 @@ void mmrd_open(MMIO *x, const char *fname, size_t size) {
 
     Context *ctx = (Context *)malloc(sizeof(Context));
     pipe(x->pipefd);
+    fcntl(x->pipefd[1], F_SETPIPE_SZ, PIPE_SIZE);
     ctx->in_fd = fd;
     ctx->out_fd = x->pipefd[1];
     ctx->size = size;
@@ -63,7 +74,7 @@ void mmrd_open(MMIO *x, const char *fname, size_t size) {
 
     x->fd = x->pipefd[0];
     x->fp = fdopen(x->fd, "rb");
-    setvbuf(x->fp, NULL, _IOFBF, PIPE_BUF);
+    setvbuf(x->fp, NULL, _IOFBF, BUF_SIZE);
 }
 
 void mmrd_close(MMIO *x) {
@@ -91,6 +102,7 @@ void mmwr_open(MMIO *x, const char *fname, size_t size) {
 
     Context *ctx = (Context *)malloc(sizeof(Context));
     pipe(x->pipefd);
+    fcntl(x->pipefd[1], F_SETPIPE_SZ, PIPE_SIZE);
     ctx->in_fd = x->pipefd[0];
     ctx->out_fd = fd;
     ctx->size = size;
@@ -99,7 +111,7 @@ void mmwr_open(MMIO *x, const char *fname, size_t size) {
 
     x->fd = x->pipefd[1];
     x->fp = fdopen(x->fd, "wb");
-    setvbuf(x->fp, NULL, _IOFBF, PIPE_BUF);
+    setvbuf(x->fp, NULL, _IOFBF, BUF_SIZE);
 }
 
 void mmwr_close(MMIO *x) {
