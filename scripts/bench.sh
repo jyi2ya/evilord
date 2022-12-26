@@ -5,7 +5,7 @@ set -e
 exec 2>&1
 
 cd "$(dirname "$0")/.." || exit 1
-gcc -O2 -DPERFCNT -DNDEBUG -pthread -std=gnu11 -o evenodd mmio/mmio-pipe.c spsc/spsc.c evenodd.c chunk.c metadata.c repair.c -Wall -Wextra -Wshadow
+gcc -O2 -DPERFCNT -DNDEBUG -pthread -std=gnu11 -o evenodd mmio/mmio-mixed.c spsc/spsc.c evenodd.c chunk.c metadata.c repair.c -Wall -Wextra -Wshadow
 mkdir -p test
 cd test || exit 1
 

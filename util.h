@@ -13,5 +13,6 @@
  * M() - 对 m 取模
  */
 #define M(x) (((x) + m) % m)
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 #endif
