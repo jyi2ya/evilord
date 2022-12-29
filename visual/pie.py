@@ -30,7 +30,5 @@ for i, p in enumerate(wedges):
     ax.annotate(recipe[i], xy=(x, y), xytext=(1.35*np.sign(x), 1.4*y),
                 horizontalalignment=horizontalalignment, fontsize='large', **kw)
 
-ax.set_title("对 evenodd 算法简单实现的性能分析")
-
 plt.savefig('pie.svg')
 plt.show()
